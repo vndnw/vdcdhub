@@ -157,7 +157,8 @@ export function reverseAlphaRestore(
 
   const borderAvgLuma = bgLumaCount > 0 ? bgLumaSum / bgLumaCount : 128;
 
-  // 3. Measure brightness excess & estimate alpha transparency (threshold delta > 3)
+  // 3. Measure brightness excess & estimate alpha transparency strictly per-pixel (threshold delta > 5)
+  // NOTE (v1.3.2): No dilation on alpha map to prevent over-darkening clean background pixels along outer edge.
   const alphaMap = new Float32Array(size * size);
 
   for (let py = 0; py < size; py++) {
@@ -174,10 +175,10 @@ export function reverseAlphaRestore(
       const delta = pixelLuma - effectiveBg;
       const deltaDenom = Math.max(15, 255 - effectiveBg);
 
-      if (delta > 3) {
-        // Smooth linear ramp starting right at delta > 3
-        const ramp = Math.min(1.0, (delta - 3) / 5.0);
-        const rawAlpha = ((delta - 2) / deltaDenom) * 1.15 * ramp;
+      if (delta > 5) {
+        // Smooth linear ramp starting strictly at delta > 5
+        const ramp = Math.min(1.0, (delta - 5) / 5.0);
+        const rawAlpha = ((delta - 4) / deltaDenom) * 1.15 * ramp;
         alphaMap[py * size + px] = Math.max(0, Math.min(0.85, rawAlpha));
       } else {
         alphaMap[py * size + px] = 0;
@@ -185,50 +186,8 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 1.5px morphological dilation on estimated alpha map
-  const dilatedAlpha = new Float32Array(size * size);
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      let maxA = alphaMap[py * size + px];
-      for (let dy = -1; dy <= 1; dy++) {
-        const ny = py + dy;
-        if (ny < 0 || ny >= size) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = px + dx;
-          if (nx < 0 || nx >= size) continue;
-          if (dx * dx + dy * dy <= 2.25) {
-            // within 1.5px
-            const val = alphaMap[ny * size + nx];
-            if (val > maxA) maxA = val;
-          }
-        }
-      }
-      dilatedAlpha[py * size + px] = maxA;
-    }
-  }
-
-  // Soft Gaussian feather on the dilated alpha to eliminate any hairline border
-  const smoothAlpha = new Float32Array(size * size);
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      let sum = 0,
-        count = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        const ny = py + dy;
-        if (ny < 0 || ny >= size) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = px + dx;
-          if (nx < 0 || nx >= size) continue;
-          const w = dx === 0 && dy === 0 ? 4 : dx === 0 || dy === 0 ? 2 : 1;
-          sum += dilatedAlpha[ny * size + nx] * w;
-          count += w;
-        }
-      }
-      smoothAlpha[py * size + px] = sum / count;
-    }
-  }
-
   // 4. Stage 1: Reverse Alpha Un-blending + Stage 2: Saturated Highlights Clone
+  // Applied strictly per-pixel where alpha > 0.01 — untouched background pixels (delta <= 5) are NEVER darkened.
   let unblendedCount = 0;
   let clonedCount = 0;
 
@@ -237,8 +196,8 @@ export function reverseAlphaRestore(
     const row = y * width;
     for (let px = 0; px < size; px++) {
       const x = boxX + px;
-      const alpha = smoothAlpha[py * size + px];
-      if (alpha <= 0.008) continue;
+      const alpha = alphaMap[py * size + px];
+      if (alpha <= 0.01) continue;
 
       const idx = (row + x) * 4;
       const r = data[idx];
@@ -267,6 +226,112 @@ export function reverseAlphaRestore(
         data[idx + 1] = Math.round(cleanG);
         data[idx + 2] = Math.round(cleanB);
         unblendedCount++;
+      }
+    }
+  }
+
+  // 5. Stage 3: 2px Seam Ring Interpolation (v1.3.2)
+  // Detect the narrow 2px-wide transition ring right along the boundary where alpha > 0 meets alpha === 0.
+  // Replace only those 2px boundary ring pixels by smoothly interpolating from clean unmasked pixels
+  // (alpha === 0) immediately adjacent to them within a 3px radius, erasing the hairline edge seam
+  // without touching the crisp interior texture.
+  const ringBuffer = new Uint8ClampedArray(size * size * 4);
+  const inRing = new Uint8Array(size * size);
+
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const alpha = alphaMap[py * size + px];
+      if (alpha <= 0.01) continue; // Clean background pixel, skip
+
+      // Check minimum Euclidean distance to a clean unmasked pixel (alpha === 0 or outside box)
+      let minDistSq = 999;
+      for (let dy = -2; dy <= 2; dy++) {
+        const ny = py + dy;
+        for (let dx = -2; dx <= 2; dx++) {
+          const d2 = dx * dx + dy * dy;
+          if (d2 > 4.5) continue; // within 2px (Euclidean dist <= 2.12px)
+          const nx = px + dx;
+          const isClean =
+            nx < 0 || nx >= size || ny < 0 || ny >= size || alphaMap[ny * size + nx] <= 0.01;
+          if (isClean && d2 < minDistSq) {
+            minDistSq = d2;
+          }
+        }
+      }
+
+      if (minDistSq <= 4.5) {
+        // Pixel is in the 2px boundary transition ring
+        inRing[py * size + px] = 1;
+        const minDist = Math.sqrt(minDistSq);
+
+        // Interpolate from clean unmasked pixels (alpha === 0) within a 3px radius
+        let sumR = 0,
+          sumG = 0,
+          sumB = 0,
+          totalW = 0;
+
+        for (let dy = -3; dy <= 3; dy++) {
+          const ny = py + dy;
+          const gy = boxY + ny;
+          if (gy < 0 || gy >= height) continue;
+
+          for (let dx = -3; dx <= 3; dx++) {
+            const d2 = dx * dx + dy * dy;
+            if (d2 === 0 || d2 > 9.5) continue; // within 3px radius (dist <= 3.08px)
+            const nx = px + dx;
+            const gx = boxX + nx;
+            if (gx < 0 || gx >= width) continue;
+
+            const isClean =
+              nx < 0 || nx >= size || ny < 0 || ny >= size || alphaMap[ny * size + nx] <= 0.01;
+            if (!isClean) continue;
+
+            const dist = Math.sqrt(d2);
+            const w = 1.0 / dist;
+            const cIdx = (gy * width + gx) * 4;
+            sumR += data[cIdx] * w;
+            sumG += data[cIdx + 1] * w;
+            sumB += data[cIdx + 2] * w;
+            totalW += w;
+          }
+        }
+
+        const bOffset = (py * size + px) * 4;
+        if (totalW > 0) {
+          const interpR = sumR / totalW;
+          const interpG = sumG / totalW;
+          const interpB = sumB / totalW;
+
+          // Seamless transition: pixels directly at boundary (dist <= 1.2px) take 100% interpolated,
+          // inner ring pixels (1.2px < dist <= 2.12px) blend smoothly with unblended interior.
+          const interpWeight = minDist <= 1.2 ? 1.0 : Math.max(0.4, 1.0 - (minDist - 1.2) * 0.6);
+          const unblendWeight = 1.0 - interpWeight;
+
+          const curIdx = ((boxY + py) * width + (boxX + px)) * 4;
+          ringBuffer[bOffset] = Math.round(interpR * interpWeight + data[curIdx] * unblendWeight);
+          ringBuffer[bOffset + 1] = Math.round(interpG * interpWeight + data[curIdx + 1] * unblendWeight);
+          ringBuffer[bOffset + 2] = Math.round(interpB * interpWeight + data[curIdx + 2] * unblendWeight);
+        } else {
+          const curIdx = ((boxY + py) * width + (boxX + px)) * 4;
+          ringBuffer[bOffset] = data[curIdx];
+          ringBuffer[bOffset + 1] = data[curIdx + 1];
+          ringBuffer[bOffset + 2] = data[curIdx + 2];
+        }
+      }
+    }
+  }
+
+  // Write ring buffer back to image data
+  for (let py = 0; py < size; py++) {
+    const y = boxY + py;
+    const row = y * width;
+    for (let px = 0; px < size; px++) {
+      if (inRing[py * size + px] === 1) {
+        const idx = (row + (boxX + px)) * 4;
+        const bOffset = (py * size + px) * 4;
+        data[idx] = ringBuffer[bOffset];
+        data[idx + 1] = ringBuffer[bOffset + 1];
+        data[idx + 2] = ringBuffer[bOffset + 2];
       }
     }
   }
