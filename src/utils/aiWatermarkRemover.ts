@@ -1,14 +1,12 @@
 // ============================================================
-// Gemini Watermark Remover — Reverse Alpha Un-Blending Pipeline (v1.3.0)
+// Gemini Watermark Remover — True AI LaMa ONNX Inpainting (v2.0.0)
 //
-// Stage 1: Exact Watermark Anchor & Mathematical Reverse Alpha Un-blending
-//          Recovers the true underlying floor/background pixels from
-//          the semi-transparent white watermark overlay:
-//          C_clean = clamp((C_watermarked - alpha * 255) / (1 - alpha), 0, 255)
-//
-// Stage 2: Clean Neighboring Texture Clone (Fallback for Saturated Highlights)
-//          Clones from clean background shifted outside the watermark box
-//          with 2px edge feathering for near-saturated pixels (luma > 248).
+// Pipeline:
+// 1. Bottom-Right 512x512 Local Crop & 5px-Dilated Star Mask
+// 2. Client-Side LaMa ONNX Inference via onnxruntime-web + jsDelivr WASM
+// 3. Browser CacheStorage for 0-Latency Subsequent Inferences
+// 4. Seamless 6px Feathered Border Composite Back onto Full Canvas
+// 5. Zero-Fail Fallback to Reverse Alpha Mathematical Un-Blending
 // ============================================================
 
 export type CoveragePreset = 'compact' | 'default' | 'large' | 'wide';
@@ -17,7 +15,7 @@ export interface InpaintResult {
   fullCanvas: HTMLCanvasElement;
   patchBeforeCanvas: HTMLCanvasElement;
   patchAfterCanvas: HTMLCanvasElement;
-  engineUsed: 'reverse-alpha-unblend' | 'texture-synthesis';
+  engineUsed: 'lama-onnx' | 'reverse-alpha-unblend' | 'texture-synthesis';
   executionTimeMs: number;
 }
 
@@ -27,20 +25,188 @@ export interface ModelLoadProgress {
   message: string;
 }
 
+export const LAMA_MODEL_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx';
+export const MODEL_CACHE_NAME = 'lama-onnx-v2';
+
+let cachedSession: any = null;
+
 /**
- * Compatibility stub
+ * Loads onnxruntime-web dynamically via official jsDelivr CDN script tag.
+ * Bypasses Next.js / Webpack / Terser 'import.meta' bundling errors while
+ * keeping client-side bundle light and WASM paths guaranteed to work on Vercel.
  */
-export async function isModelCached(): Promise<boolean> {
-  return false;
+export async function getOrt(): Promise<any> {
+  if (typeof window === 'undefined') return null;
+  if ((window as any).ort) return (window as any).ort;
+
+  return new Promise((resolve, reject) => {
+    const existing = document.getElementById('ort-web-script') as HTMLScriptElement;
+    if (existing) {
+      if ((window as any).ort) return resolve((window as any).ort);
+      existing.addEventListener('load', () => resolve((window as any).ort));
+      existing.addEventListener('error', (e) => reject(e));
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = 'ort-web-script';
+    script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js';
+    script.crossOrigin = 'anonymous';
+    script.onload = () => {
+      const ort = (window as any).ort;
+      if (ort) {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
+        ort.env.wasm.numThreads = 1;
+        resolve(ort);
+      } else {
+        reject(new Error('window.ort not found after script load'));
+      }
+    };
+    script.onerror = () => reject(new Error('Failed to load onnxruntime-web script from CDN'));
+    document.head.appendChild(script);
+  });
 }
 
 /**
- * Compatibility stub
+ * Checks if the LaMa ONNX model is already cached in browser CacheStorage
+ */
+export async function isModelCached(): Promise<boolean> {
+  if (typeof window === 'undefined' || !('caches' in window)) return false;
+  try {
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    const match = await cache.match(LAMA_MODEL_URL);
+    return !!match;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Loads the LaMa ONNX model via CacheStorage and creates an InferenceSession
  */
 export async function getLamaSession(
   onProgress?: (info: ModelLoadProgress) => void
 ): Promise<any> {
-  return null;
+  if (cachedSession) return cachedSession;
+  if (typeof window === 'undefined') return null;
+
+  onProgress?.({
+    status: 'checking-cache',
+    progress: 5,
+    message: 'Đang kiểm tra AI model...',
+  });
+
+  const ort = await getOrt();
+  if (!ort) throw new Error('Could not initialize ONNX Runtime Web');
+
+  let modelBuffer: ArrayBuffer | null = null;
+
+  if ('caches' in window) {
+    try {
+      const cache = await caches.open(MODEL_CACHE_NAME);
+      const cached = await cache.match(LAMA_MODEL_URL);
+      if (cached) {
+        onProgress?.({
+          status: 'ready',
+          progress: 50,
+          message: 'Tải AI model từ bộ nhớ đệm...',
+        });
+        modelBuffer = await cached.arrayBuffer();
+      } else {
+        onProgress?.({
+          status: 'downloading',
+          progress: 10,
+          message: 'Đang tải AI LaMa model (~200MB)...',
+        });
+        const resp = await fetch(LAMA_MODEL_URL);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+        const contentLength = resp.headers.get('content-length');
+        const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+        if (total && resp.body) {
+          const reader = resp.body.getReader();
+          let loaded = 0;
+          const chunks: Uint8Array[] = [];
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              chunks.push(value);
+              loaded += value.length;
+              const pct = Math.round(10 + (loaded / total) * 75);
+              onProgress?.({
+                status: 'downloading',
+                progress: pct,
+                message: `Đang tải AI model: ${Math.round(loaded / (1024 * 1024))}MB / ${Math.round(total / (1024 * 1024))}MB (${pct}%)`,
+              });
+            }
+          }
+          const fullArray = new Uint8Array(loaded);
+          let offset = 0;
+          for (const chunk of chunks) {
+            fullArray.set(chunk, offset);
+            offset += chunk.length;
+          }
+          modelBuffer = fullArray.buffer;
+
+          try {
+            await cache.put(
+              LAMA_MODEL_URL,
+              new Response(fullArray, {
+                headers: { 'Content-Type': 'application/octet-stream' },
+              })
+            );
+          } catch (cErr) {
+            console.warn('Cache put failed:', cErr);
+          }
+        } else {
+          const buf = await resp.arrayBuffer();
+          modelBuffer = buf;
+          try {
+            await cache.put(
+              LAMA_MODEL_URL,
+              new Response(buf, {
+                headers: { 'Content-Type': 'application/octet-stream' },
+              })
+            );
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.warn('CacheStorage access error, falling back to direct fetch:', err);
+    }
+  }
+
+  if (!modelBuffer) {
+    onProgress?.({
+      status: 'downloading',
+      progress: 30,
+      message: 'Đang tải AI LaMa model...',
+    });
+    const resp = await fetch(LAMA_MODEL_URL);
+    if (!resp.ok) throw new Error(`Model fetch failed: ${resp.status}`);
+    modelBuffer = await resp.arrayBuffer();
+  }
+
+  onProgress?.({
+    status: 'compiling',
+    progress: 90,
+    message: 'Khởi tạo WebAssembly Neural Engine...',
+  });
+
+  const session = await ort.InferenceSession.create(modelBuffer, {
+    executionProviders: ['wasm'],
+  });
+
+  cachedSession = session;
+  onProgress?.({
+    status: 'ready',
+    progress: 100,
+    message: 'AI Model sẵn sàng!',
+  });
+
+  return session;
 }
 
 /**
@@ -452,6 +618,227 @@ export function reverseAlphaRestore(
 }
 
 /**
+ * Runs True AI LaMa Inpainting on the bottom-right corner where the Gemini logo lives.
+ * Extracts a proportional crop (scaled to 512x512), builds a 5px-dilated star mask,
+ * executes onnxruntime-web inference, and composites the cleaned patch back
+ * with a 6px feathered boundary blend.
+ */
+export async function lamaInpaintBottomRight(
+  fullCanvas: HTMLCanvasElement,
+  coverage: CoveragePreset = 'default',
+  onProgress?: (info: ModelLoadProgress) => void
+): Promise<boolean> {
+  const origWidth = fullCanvas.width;
+  const origHeight = fullCanvas.height;
+  const fullCtx = fullCanvas.getContext('2d')!;
+
+  // 1. Calculate bottom-right crop dimensions
+  const minDim = Math.min(origWidth, origHeight);
+  let sizeScale = 0.055;
+  if (coverage === 'compact') sizeScale = 0.045;
+  else if (coverage === 'large') sizeScale = 0.070;
+  else if (coverage === 'wide') sizeScale = 0.088;
+
+  const rawStarSize = Math.round(Math.max(52, minDim * sizeScale * 1.25));
+  const cropSize = Math.min(
+    origWidth,
+    Math.min(origHeight, Math.max(512, Math.round(rawStarSize * 2.8)))
+  );
+
+  const cropX = origWidth - cropSize;
+  const cropY = origHeight - cropSize;
+
+  // 2. Extract crop patch scaled to 512x512
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = 512;
+  cropCanvas.height = 512;
+  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!;
+  cropCtx.drawImage(fullCanvas, cropX, cropY, cropSize, cropSize, 0, 0, 512, 512);
+
+  const cropData = cropCtx.getImageData(0, 0, 512, 512);
+  const d = cropData.data;
+
+  // 3. Create high-precision star mask with 5px dilation on 512x512
+  const scale = 512 / cropSize;
+  const starEndX = 512 - Math.max(2, Math.round(4 * scale));
+  const starEndY = 512 - Math.max(2, Math.round(4 * scale));
+  const starBoxSize = Math.round(rawStarSize * scale);
+  const starStartX = Math.max(0, starEndX - starBoxSize);
+  const starStartY = Math.max(0, starEndY - starBoxSize);
+
+  // Compute local background luminance in crop
+  let bgLumaSum = 0;
+  let bgLumaCount = 0;
+
+  for (let x = starStartX; x < starEndX; x += 2) {
+    for (let dy = 2; dy <= 10; dy++) {
+      const y = Math.max(0, starStartY - dy);
+      const idx = (y * 512 + x) * 4;
+      bgLumaSum += 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+      bgLumaCount++;
+    }
+  }
+  for (let y = starStartY; y < starEndY; y += 2) {
+    for (let dx = 2; dx <= 10; dx++) {
+      const x = Math.max(0, starStartX - dx);
+      const idx = (y * 512 + x) * 4;
+      bgLumaSum += 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+      bgLumaCount++;
+    }
+  }
+  const avgBg = bgLumaCount > 0 ? bgLumaSum / bgLumaCount : 128;
+
+  // Initial binary star mask (255 = inpaint, 0 = keep)
+  const initialMask = new Uint8Array(512 * 512);
+  for (let y = starStartY; y < starEndY; y++) {
+    for (let x = starStartX; x < starEndX; x++) {
+      const idx = (y * 512 + x) * 4;
+      const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+      if (luma - avgBg > 4) {
+        initialMask[y * 512 + x] = 255;
+      }
+    }
+  }
+
+  // 5px morphological dilation so all surrounding JPEG compression blocks are fully covered
+  const dilatedMask = new Uint8Array(512 * 512);
+  const dilateRadius = 5;
+  for (let y = starStartY - dilateRadius; y < Math.min(512, starEndY + dilateRadius); y++) {
+    if (y < 0) continue;
+    for (let x = starStartX - dilateRadius; x < Math.min(512, starEndX + dilateRadius); x++) {
+      if (x < 0) continue;
+
+      let hit = false;
+      for (let dy = -dilateRadius; dy <= dilateRadius && !hit; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= 512) continue;
+        for (let dx = -dilateRadius; dx <= dilateRadius && !hit; dx++) {
+          if (dx * dx + dy * dy > 25.0) continue; // 5px radius
+          const nx = x + dx;
+          if (nx < 0 || nx >= 512) continue;
+          if (initialMask[ny * 512 + nx] === 255) {
+            hit = true;
+          }
+        }
+      }
+      if (hit) {
+        dilatedMask[y * 512 + x] = 255;
+      }
+    }
+  }
+
+  // 4. Load or retrieve LaMa ONNX session
+  const session = await getLamaSession(onProgress);
+  if (!session) return false;
+
+  onProgress?.({
+    status: 'ready',
+    progress: 95,
+    message: 'AI LaMa đang vẽ lại chi tiết gốc...',
+  });
+
+  const ort = await getOrt();
+
+  // 5. Prepare input tensors [1, 3, 512, 512] for image and [1, 1, 512, 512] for mask
+  const chSize = 512 * 512;
+  const imgTensorData = new Float32Array(1 * 3 * 512 * 512);
+  const maskTensorData = new Float32Array(1 * 1 * 512 * 512);
+
+  for (let i = 0; i < chSize; i++) {
+    imgTensorData[i] = d[i * 4] / 255.0; // R
+    imgTensorData[chSize + i] = d[i * 4 + 1] / 255.0; // G
+    imgTensorData[chSize * 2 + i] = d[i * 4 + 2] / 255.0; // B
+
+    maskTensorData[i] = dilatedMask[i] > 128 ? 1.0 : 0.0;
+  }
+
+  const imageTensor = new ort.Tensor('float32', imgTensorData, [1, 3, 512, 512]);
+  const maskTensor = new ort.Tensor('float32', maskTensorData, [1, 1, 512, 512]);
+
+  // 6. Run Inference
+  const feeds = { image: imageTensor, mask: maskTensor };
+  const results = await session.run(feeds);
+  const outputTensor =
+    results[session.outputNames[0]] || results['output'] || Object.values(results)[0];
+
+  if (!outputTensor || !outputTensor.data) return false;
+
+  const outData = outputTensor.data as Float32Array;
+  const cleanedCropData = cropCtx.createImageData(512, 512);
+
+  for (let i = 0; i < chSize; i++) {
+    let r = outData[i];
+    let g = outData[chSize + i];
+    let b = outData[chSize * 2 + i];
+
+    if (r <= 1.0 && g <= 1.0 && b <= 1.0) {
+      r *= 255;
+      g *= 255;
+      b *= 255;
+    }
+
+    cleanedCropData.data[i * 4] = Math.max(0, Math.min(255, Math.round(r)));
+    cleanedCropData.data[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(g)));
+    cleanedCropData.data[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(b)));
+    cleanedCropData.data[i * 4 + 3] = 255;
+  }
+
+  cropCtx.putImageData(cleanedCropData, 0, 0);
+
+  // 7. Scale back if cropSize !== 512
+  let patchCanvas: HTMLCanvasElement = cropCanvas;
+  if (cropSize !== 512) {
+    const scaledCanvas = document.createElement('canvas');
+    scaledCanvas.width = cropSize;
+    scaledCanvas.height = cropSize;
+    const sCtx = scaledCanvas.getContext('2d')!;
+    sCtx.drawImage(cropCanvas, 0, 0, 512, 512, 0, 0, cropSize, cropSize);
+    patchCanvas = scaledCanvas;
+  }
+
+  // 8. Composite cleaned patch back onto full-resolution canvas with 6px feathered blend at borders
+  const fullData = fullCtx.getImageData(0, 0, origWidth, origHeight);
+  const patchData = patchCanvas.getContext('2d')!.getImageData(0, 0, cropSize, cropSize);
+  const feather = 6;
+
+  for (let py = 0; py < cropSize; py++) {
+    const gy = cropY + py;
+    if (gy < 0 || gy >= origHeight) continue;
+
+    for (let px = 0; px < cropSize; px++) {
+      const gx = cropX + px;
+      if (gx < 0 || gx >= origWidth) continue;
+
+      let weight = 1.0;
+      if (px < feather) weight = Math.min(weight, px / feather);
+      if (py < feather) weight = Math.min(weight, py / feather);
+
+      const pIdx = (py * cropSize + px) * 4;
+      const fIdx = (gy * origWidth + gx) * 4;
+
+      if (weight >= 1.0) {
+        fullData.data[fIdx] = patchData.data[pIdx];
+        fullData.data[fIdx + 1] = patchData.data[pIdx + 1];
+        fullData.data[fIdx + 2] = patchData.data[pIdx + 2];
+      } else {
+        fullData.data[fIdx] = Math.round(
+          patchData.data[pIdx] * weight + fullData.data[fIdx] * (1.0 - weight)
+        );
+        fullData.data[fIdx + 1] = Math.round(
+          patchData.data[pIdx] * weight + fullData.data[fIdx + 1] * (1.0 - weight)
+        );
+        fullData.data[fIdx + 2] = Math.round(
+          patchData.data[pIdx] * weight + fullData.data[fIdx + 2] * (1.0 - weight)
+        );
+      }
+    }
+  }
+
+  fullCtx.putImageData(fullData, 0, 0);
+  return true;
+}
+
+/**
  * Backward compatibility alias for watermarkRemover
  */
 export function criminisiInpaint(
@@ -467,13 +854,14 @@ export function criminisiInpaint(
 }
 
 /**
- * Main 1-Click Reverse Alpha Un-Blending Pipeline:
- * 100% deterministic, zero blur, preserves true underlying floor/background pixels.
+ * Main 1-Click AI Watermark Removal Pipeline (v2.0.0):
+ * Primary engine: True LaMa ONNX AI Inpainting via browser WebAssembly.
+ * Fallback engine: Deterministic Reverse Alpha Un-Blending.
  */
 export async function removeGeminiWatermarkAuto(
   sourceImage: HTMLImageElement | HTMLCanvasElement,
   coverage: CoveragePreset = 'default',
-  preferNeural = false,
+  preferNeural = true,
   onProgress?: (info: ModelLoadProgress) => void
 ): Promise<InpaintResult> {
   const startTime = performance.now();
@@ -508,10 +896,31 @@ export async function removeGeminiWatermarkAuto(
     patchSize
   );
 
-  // 3. Execute 2-Stage Reverse Alpha Un-Blending & Seamless Texture Clone
-  const imgData = fullCtx.getImageData(0, 0, origWidth, origHeight);
-  reverseAlphaRestore(imgData, origWidth, origHeight, coverage);
-  fullCtx.putImageData(imgData, 0, 0);
+  let engineUsed: 'lama-onnx' | 'reverse-alpha-unblend' = 'reverse-alpha-unblend';
+
+  // Primary: Try True LaMa ONNX AI Inpainting
+  if (preferNeural) {
+    try {
+      const lamaSuccess = await lamaInpaintBottomRight(fullCanvas, coverage, onProgress);
+      if (lamaSuccess) {
+        engineUsed = 'lama-onnx';
+      }
+    } catch (lamaErr) {
+      console.warn('LaMa ONNX inference failed, falling back to reverse-alpha unblend:', lamaErr);
+    }
+  }
+
+  // Fallback: If LaMa was skipped or encountered an error, run reverseAlphaRestore
+  if (engineUsed !== 'lama-onnx') {
+    onProgress?.({
+      status: 'fallback',
+      progress: 90,
+      message: 'Đang phục hồi pixel chính xác...',
+    });
+    const imgData = fullCtx.getImageData(0, 0, origWidth, origHeight);
+    reverseAlphaRestore(imgData, origWidth, origHeight, coverage);
+    fullCtx.putImageData(imgData, 0, 0);
+  }
 
   // 4. Patch after canvas
   const patchAfterCanvas = document.createElement('canvas');
@@ -536,7 +945,7 @@ export async function removeGeminiWatermarkAuto(
     fullCanvas,
     patchBeforeCanvas,
     patchAfterCanvas,
-    engineUsed: 'reverse-alpha-unblend' as any,
+    engineUsed: engineUsed as any,
     executionTimeMs,
   };
 }
