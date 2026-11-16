@@ -41,13 +41,16 @@ export default function HomePage() {
     <div className="h-[100dvh] flex flex-col bg-editor-bg text-white overflow-hidden overscroll-none">
       {/* ---------------- Slim Sticky Top Header (48px) ---------------- */}
       <header className="h-12 flex-none border-b border-editor-border bg-editor-surface/90 backdrop-blur-md px-3 sm:px-6 flex items-center justify-between z-40">
-        {/* Left: Brand Icon (Hidden or compact on mobile) */}
+        {/* Left: Brand Icon & Version Badge */}
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-accent to-accent-dark flex items-center justify-center shadow-sm">
             <span className="font-extrabold text-xs text-black">TM</span>
           </div>
           <span className="text-xs font-bold tracking-tight hidden sm:inline">
             Time<span className="text-accent">mark</span> Studio
+          </span>
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 hidden sm:inline-block">
+            v1.2.0
           </span>
         </div>
 
@@ -78,9 +81,12 @@ export default function HomePage() {
           </button>
         </nav>
 
-        {/* Right placeholder for balance */}
-        <div className="w-7 flex justify-end">
-          <span className="w-2 h-2 rounded-full bg-emerald-500/80" title="Client-Side" />
+        {/* Right: Version Pill on mobile + Client-side status indicator */}
+        <div className="flex items-center gap-2">
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 sm:hidden">
+            v1.2.0
+          </span>
+          <span className="w-2 h-2 rounded-full bg-emerald-500/80" title="100% Client-Side" />
         </div>
       </header>
 

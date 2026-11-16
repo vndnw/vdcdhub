@@ -16,9 +16,8 @@ export interface BoundingBox {
 export type AutoRegionSize = 'small' | 'medium' | 'large';
 
 /**
- * Calculate the tight Gemini AI watermark region in the bottom-right corner.
- * Standard Gemini star watermark is ~4.5%-5.5% of min dimension,
- * located ~1.5% from the bottom and right edges.
+ * Calculate the generous Gemini AI watermark region in the bottom-right corner
+ * with +8px dilation on all sides to ensure zero anti-aliased white glow remains.
  */
 export function getAutoWatermarkBox(
   imgWidth: number,
@@ -26,33 +25,33 @@ export function getAutoWatermarkBox(
   sizePreset: AutoRegionSize = 'medium',
   customScale = 1.0
 ): BoundingBox {
-  const minDim = Math.min(imgWidth, imgHeight);
-
-  // Proportions relative to image dimensions: tight around the 4-point star
-  let boxFraction = 0.048; // ~4.8% of min dimension
-  let marginFraction = 0.015; // ~1.5% margin from bottom and right edges
+  let boxFraction = 0.11; // 11% standard box
+  let minMargin = 0.01; // 1% edge margin
 
   if (sizePreset === 'small') {
-    boxFraction = 0.042;
-    marginFraction = 0.013;
+    boxFraction = 0.09;
+    minMargin = 0.008;
   } else if (sizePreset === 'large') {
-    boxFraction = 0.058;
-    marginFraction = 0.016;
+    boxFraction = 0.14;
+    minMargin = 0.012;
   }
 
-  const boxSize = Math.max(22, Math.round(minDim * boxFraction * customScale));
-  const marginX = Math.max(8, Math.round(imgWidth * marginFraction));
-  const marginY = Math.max(8, Math.round(imgHeight * marginFraction));
+  const boxW = Math.max(90, Math.round(imgWidth * boxFraction * customScale));
+  const boxH = Math.max(90, Math.round(imgHeight * boxFraction * customScale));
+  const marginX = Math.max(8, Math.round(imgWidth * minMargin));
+  const marginY = Math.max(8, Math.round(imgHeight * minMargin));
 
-  const x = Math.max(0, imgWidth - marginX - boxSize);
-  const y = Math.max(0, imgHeight - marginY - boxSize);
+  // Dilate by +8px on all sides
+  const dilation = 8;
+  const rawX = Math.max(0, imgWidth - marginX - boxW);
+  const rawY = Math.max(0, imgHeight - marginY - boxH);
 
-  return {
-    x,
-    y,
-    width: Math.min(boxSize, imgWidth - x),
-    height: Math.min(boxSize, imgHeight - y),
-  };
+  const x = Math.max(0, rawX - dilation);
+  const y = Math.max(0, rawY - dilation);
+  const width = Math.min(imgWidth - x, boxW + dilation * 2);
+  const height = Math.min(imgHeight - y, boxH + dilation * 2);
+
+  return { x, y, width, height };
 }
 
 /**
@@ -161,8 +160,11 @@ export async function inpaintImage(
 
   // 4. Sharp Exemplar-Based Texture Synthesis (Criminisi)
   // Copies real neighboring pixel patches (SSD over known pixels)
-  // guaranteeing 100% sharp texture with zero blur.
-  criminisiInpaint(patchImageData, patchMask, cropW, cropH, 3, 50);
+  // strictly excluding any sample from the watermark region.
+  criminisiInpaint(patchImageData, patchMask, cropW, cropH, 3, 65, {
+    minX: minX - cropX,
+    minY: minY - cropY,
+  });
 
   // 5. Write back to output canvas at full original resolution
   const outCanvas = document.createElement('canvas');
