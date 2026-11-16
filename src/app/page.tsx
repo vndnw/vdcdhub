@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import dynamic from 'next/dynamic';
-import { Clock, Sparkles } from 'lucide-react';
+import { Clock } from 'lucide-react';
 
 const Editor = dynamic(() => import('@/components/Editor'), {
   ssr: false,
@@ -12,87 +12,46 @@ const Editor = dynamic(() => import('@/components/Editor'), {
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent to-accent-dark flex items-center justify-center animate-pulse">
           <Clock size={20} className="text-black" />
         </div>
-        <div className="text-xs text-neutral-500">Đang tải Timemark...</div>
+        <div className="text-xs text-neutral-500">Đang tải VDCD Húp...</div>
       </div>
     </div>
   ),
 });
-
-const GeminiAutoRemover = dynamic(() => import('@/components/GeminiAutoRemover'), {
-  ssr: false,
-  loading: () => (
-    <div className="flex items-center justify-center h-full bg-editor-bg">
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center animate-pulse">
-          <Sparkles size={20} className="text-white" />
-        </div>
-        <div className="text-xs text-neutral-500">Đang tải Xóa Logo...</div>
-      </div>
-    </div>
-  ),
-});
-
-type AppTab = 'timemark' | 'gemini-remover';
 
 export default function HomePage() {
-  const [activeTab, setActiveTab] = useState<AppTab>('timemark');
-
   return (
     <div className="h-[100dvh] flex flex-col bg-editor-bg text-white overflow-hidden overscroll-none">
       {/* ---------------- Slim Sticky Top Header (48px) ---------------- */}
       <header className="h-12 flex-none border-b border-editor-border bg-editor-surface/90 backdrop-blur-md px-3 sm:px-6 flex items-center justify-between z-40">
         {/* Left: Brand Icon & Version Badge */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-accent to-accent-dark flex items-center justify-center shadow-sm">
-            <span className="font-extrabold text-xs text-black">TM</span>
+            <span className="font-extrabold text-xs text-black">VH</span>
           </div>
-          <span className="text-xs font-bold tracking-tight hidden sm:inline">
-            Time<span className="text-accent">mark</span> Studio
+          <span className="text-sm font-bold tracking-tight">
+            VDCD <span className="text-accent">Húp</span>
           </span>
-          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 hidden sm:inline-block">
-            v2.1.0
+          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-accent/20 text-accent border border-accent/30">
+            v2.2.0
           </span>
         </div>
 
-        {/* Center: Clean 2-Tab Pill Switcher */}
-        <nav className="flex items-center p-0.5 bg-black/50 border border-editor-border rounded-xl">
-          <button
-            onClick={() => setActiveTab('timemark')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all min-h-[34px] ${
-              activeTab === 'timemark'
-                ? 'bg-accent text-black shadow-sm'
-                : 'text-neutral-400 hover:text-white'
-            }`}
-          >
-            <Clock size={13} />
-            <span>Timemark</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('gemini-remover')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all min-h-[34px] ${
-              activeTab === 'gemini-remover'
-                ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-sm'
-                : 'text-neutral-400 hover:text-white'
-            }`}
-          >
-            <Sparkles size={13} />
-            <span>Xóa Logo</span>
-          </button>
-        </nav>
-
-        {/* Right: Version Pill on mobile + Client-side status indicator */}
+        {/* Right: Client-side privacy badge */}
         <div className="flex items-center gap-2">
-          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 sm:hidden">
-            v2.1.0
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hidden sm:inline-flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            100% Client-Side
           </span>
-          <span className="w-2 h-2 rounded-full bg-emerald-500/80" title="100% Client-Side" />
+          <span
+            className="w-2 h-2 rounded-full bg-emerald-500/80 sm:hidden"
+            title="100% Client-Side"
+          />
         </div>
       </header>
 
       {/* ---------------- Workspace ---------------- */}
       <main className="flex-1 overflow-hidden relative">
-        {activeTab === 'timemark' ? <Editor /> : <GeminiAutoRemover />}
+        <Editor />
       </main>
     </div>
   );

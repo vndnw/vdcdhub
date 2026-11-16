@@ -82,7 +82,7 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
               <ImageIcon size={20} className="text-black" />
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
-              Time<span className="text-accent">mark</span>
+              VDCD <span className="text-accent">Húp</span>
             </h1>
           </div>
           <p className="text-neutral-400 text-xs sm:text-sm max-w-sm mx-auto">

@@ -152,7 +152,7 @@ export default function Editor() {
         {/* Desktop Header */}
         <div className="hidden lg:flex items-center justify-between px-5 py-2.5 border-b border-editor-border bg-editor-surface/60">
           <div className="flex items-center gap-3">
-            <span className="text-xs font-bold text-neutral-300">Timemark Watermark</span>
+            <span className="text-xs font-bold text-neutral-300">VDCD Húp — Timemark Stamp</span>
             {imageInfo && (
               <span className="text-xs text-neutral-500">
                 {imageInfo.width} × {imageInfo.height} • {imageInfo.size}

@@ -2,12 +2,19 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Timemark — Photo Timestamp & Logo Remover',
-  description: 'Add authentic Timemark timestamps and remove AI watermarks directly in your browser. 100% client-side privacy.',
+  title: 'VDCD Húp - Đóng dấu ảnh thời gian & địa điểm chuẩn Timemark',
+  description:
+    'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt. 100% xử lý trên thiết bị, bảo mật tuyệt đối.',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'Timemark',
+    title: 'VDCD Húp',
+  },
+  openGraph: {
+    title: 'VDCD Húp - Đóng dấu ảnh chuẩn Timemark',
+    description:
+      'Đóng dấu ngày giờ, toạ độ, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt.',
+    type: 'website',
   },
 };
 
