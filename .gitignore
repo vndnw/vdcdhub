@@ -41,3 +41,5 @@ bin/
 scratch/
 test-*.jpg
 test-*.png
+
+.vercel
