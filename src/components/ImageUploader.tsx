@@ -87,7 +87,6 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
           </div>
           <p className="text-neutral-400 text-xs sm:text-sm max-w-sm mx-auto">
             Đóng dấu ngày giờ, địa chỉ chính xác chuẩn Timemark lên ảnh.
-            Xử lý 100% trên thiết bị của bạn.
           </p>
         </div>
 

@@ -4,7 +4,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'VDCD Húp - Đóng dấu ảnh thời gian & địa điểm chuẩn Timemark',
   description:
-    'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt. 100% xử lý trên thiết bị, bảo mật tuyệt đối.',
+    'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt.',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',

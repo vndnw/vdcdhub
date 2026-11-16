@@ -32,20 +32,8 @@ export default function HomePage() {
             VDCD <span className="text-accent">Húp</span>
           </span>
           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-accent/20 text-accent border border-accent/30">
-            v2.2.0
+            v2.2.1
           </span>
-        </div>
-
-        {/* Right: Client-side privacy badge */}
-        <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hidden sm:inline-flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            100% Client-Side
-          </span>
-          <span
-            className="w-2 h-2 rounded-full bg-emerald-500/80 sm:hidden"
-            title="100% Client-Side"
-          />
         </div>
       </header>
 
