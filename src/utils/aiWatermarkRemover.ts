@@ -230,7 +230,119 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 5. Stage 3: 2px Seam Ring Interpolation (v1.3.2)
+  // 5. Stage 3: Boundary Luminance Offset Calibration (v1.3.3)
+  // Compare inner boundary ring (alpha > 0.02, near edge) against outer boundary ring (alpha <= 0.01, clean background)
+  // to compensate for JPEG compression ringing and eliminate any faint 2-4% luminance ghost.
+  let outerSumR = 0,
+    outerSumG = 0,
+    outerSumB = 0,
+    outerCount = 0;
+  let innerSumR = 0,
+    innerSumG = 0,
+    innerSumB = 0,
+    innerCount = 0;
+
+  for (let py = 0; py < size; py++) {
+    const y = boxY + py;
+    for (let px = 0; px < size; px++) {
+      const x = boxX + px;
+      const alpha = alphaMap[py * size + px];
+      const idx = (y * width + x) * 4;
+
+      if (alpha > 0.02) {
+        // Inner boundary pixel: inside watermark, but within 2px of clean background
+        let nearClean = false;
+        for (let dy = -2; dy <= 2 && !nearClean; dy++) {
+          const ny = py + dy;
+          for (let dx = -2; dx <= 2 && !nearClean; dx++) {
+            if (dx * dx + dy * dy > 4.5) continue;
+            const nx = px + dx;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size || alphaMap[ny * size + nx] <= 0.01) {
+              nearClean = true;
+            }
+          }
+        }
+        if (nearClean) {
+          innerSumR += data[idx];
+          innerSumG += data[idx + 1];
+          innerSumB += data[idx + 2];
+          innerCount++;
+        }
+      } else {
+        // Outer boundary pixel: clean background, within 2.5px of watermark perimeter
+        let nearStar = false;
+        for (let dy = -2; dy <= 2 && !nearStar; dy++) {
+          const ny = py + dy;
+          if (ny < 0 || ny >= size) continue;
+          for (let dx = -2; dx <= 2 && !nearStar; dx++) {
+            if (dx * dx + dy * dy > 5.5) continue;
+            const nx = px + dx;
+            if (nx >= 0 && nx < size && alphaMap[ny * size + nx] > 0.02) {
+              nearStar = true;
+            }
+          }
+        }
+        if (nearStar) {
+          outerSumR += data[idx];
+          outerSumG += data[idx + 1];
+          outerSumB += data[idx + 2];
+          outerCount++;
+        }
+      }
+    }
+  }
+
+  if (outerCount > 0 && innerCount > 0) {
+    const avgOuterR = outerSumR / outerCount;
+    const avgOuterG = outerSumG / outerCount;
+    const avgOuterB = outerSumB / outerCount;
+
+    const avgInnerR = innerSumR / innerCount;
+    const avgInnerG = innerSumG / innerCount;
+    const avgInnerB = innerSumB / innerCount;
+
+    // Residual luminance offset (clamped to [-18, 18] for subtle 2-4% calibration)
+    const offsetR = Math.max(-18, Math.min(18, avgOuterR - avgInnerR));
+    const offsetG = Math.max(-18, Math.min(18, avgOuterG - avgInnerG));
+    const offsetB = Math.max(-18, Math.min(18, avgOuterB - avgInnerB));
+
+    // Apply smooth corrective offset weighted by normalized alpha
+    for (let py = 0; py < size; py++) {
+      const y = boxY + py;
+      const row = y * width;
+      for (let px = 0; px < size; px++) {
+        const alpha = alphaMap[py * size + px];
+        if (alpha <= 0.01) continue;
+
+        const idx = (row + (boxX + px)) * 4;
+        const normAlpha = Math.min(1.0, alpha / 0.45);
+
+        data[idx] = Math.max(0, Math.min(255, Math.round(data[idx] + offsetR * normAlpha)));
+        data[idx + 1] = Math.max(0, Math.min(255, Math.round(data[idx + 1] + offsetG * normAlpha)));
+        data[idx + 2] = Math.max(0, Math.min(255, Math.round(data[idx + 2] + offsetB * normAlpha)));
+      }
+    }
+  }
+
+  // 6. Stage 4: Micro-Grain Matching (v1.3.3)
+  // Subtle zero-mean sensor noise (±1.5 RGB variance) to restore natural floor tile grain
+  // and dither away any JPEG compression quantization artifacts inside the star.
+  for (let py = 0; py < size; py++) {
+    const y = boxY + py;
+    const row = y * width;
+    for (let px = 0; px < size; px++) {
+      const alpha = alphaMap[py * size + px];
+      if (alpha <= 0.02) continue;
+
+      const idx = (row + (boxX + px)) * 4;
+      const grain = (Math.random() - 0.5) * 3.0; // Zero-mean ±1.5 variance
+      data[idx] = Math.max(0, Math.min(255, Math.round(data[idx] + grain)));
+      data[idx + 1] = Math.max(0, Math.min(255, Math.round(data[idx + 1] + grain)));
+      data[idx + 2] = Math.max(0, Math.min(255, Math.round(data[idx + 2] + grain)));
+    }
+  }
+
+  // 7. Stage 5: 2px Seam Ring Interpolation (v1.3.2/v1.3.3)
   // Detect the narrow 2px-wide transition ring right along the boundary where alpha > 0 meets alpha === 0.
   // Replace only those 2px boundary ring pixels by smoothly interpolating from clean unmasked pixels
   // (alpha === 0) immediately adjacent to them within a 3px radius, erasing the hairline edge seam
