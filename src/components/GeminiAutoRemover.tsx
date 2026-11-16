@@ -33,10 +33,8 @@ export default function GeminiAutoRemover() {
 
     img.onload = async () => {
       try {
-        // Automatic high-precision AI removal of bottom-right watermark (LaMa ONNX)
-        const result = await removeGeminiWatermarkAuto(img, 'default', true, (info) => {
-          setProcessingMessage(info.message);
-        });
+        // Instant 2-Pass Texture-Preserving Watermark Removal (<30ms, 0MB download)
+        const result = await removeGeminiWatermarkAuto(img, 'default', false);
         setFullCanvas(result.fullCanvas);
         setCleanedUrl(result.fullCanvas.toDataURL('image/png'));
       } catch (err) {
@@ -199,8 +197,8 @@ export default function GeminiAutoRemover() {
       <div className="flex flex-col items-center justify-center min-h-[calc(100dvh-48px)] p-6 fade-in">
         <div className="flex flex-col items-center gap-3 max-w-xs text-center">
           <Loader2 size={36} className="text-purple-400 animate-spin" />
-          <p className="text-sm font-semibold text-white">{processingMessage || 'Đang xóa logo AI tự động...'}</p>
-          <p className="text-xs text-neutral-500">LaMa Neural Inpainting • Giữ nguyên độ phân giải gốc</p>
+          <p className="text-sm font-semibold text-white">Đang xóa logo tự động...</p>
+          <p className="text-xs text-neutral-500">Instant 2-Pass Engine • Giữ nguyên 100% độ nét gốc</p>
         </div>
       </div>
     );

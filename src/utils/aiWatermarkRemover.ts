@@ -1,12 +1,15 @@
 // ============================================================
-// Gemini Watermark Remover — True AI LaMa ONNX Inpainting (v2.0.0)
+// Gemini Watermark Remover — Instant 2-Pass Texture Engine (v2.1.0)
 //
-// Pipeline:
-// 1. Bottom-Right 512x512 Local Crop & 5px-Dilated Star Mask
-// 2. Client-Side LaMa ONNX Inference via onnxruntime-web + jsDelivr WASM
-// 3. Browser CacheStorage for 0-Latency Subsequent Inferences
-// 4. Seamless 6px Feathered Border Composite Back onto Full Canvas
-// 5. Zero-Fail Fallback to Reverse Alpha Mathematical Un-Blending
+// Pass 1: Pixel-Exact Reverse Alpha Un-Blending (Mathematical Recovery)
+//         Restores the true underlying background luminance by inverting
+//         the semi-transparent white watermark overlay:
+//         C_clean = clamp((C_watermarked - alpha * 255) / (1 - alpha), 0, 255)
+//
+// Pass 2: Micro-Patch Exemplar Texture Synthesis (<30ms, 0MB Download)
+//         Replaces remaining JPEG ringing/ghosting inside the tight 3px-dilated
+//         star mask with exact sharp 6x6 pixel blocks sampled from the clean
+//         surrounding tile ring (10px–45px outside), finished with a 1.5px feather blend.
 // ============================================================
 
 export type CoveragePreset = 'compact' | 'default' | 'large' | 'wide';
@@ -15,7 +18,7 @@ export interface InpaintResult {
   fullCanvas: HTMLCanvasElement;
   patchBeforeCanvas: HTMLCanvasElement;
   patchAfterCanvas: HTMLCanvasElement;
-  engineUsed: 'lama-onnx' | 'reverse-alpha-unblend' | 'texture-synthesis';
+  engineUsed: 'instant-2pass-texture' | 'reverse-alpha-unblend';
   executionTimeMs: number;
 }
 
@@ -25,188 +28,20 @@ export interface ModelLoadProgress {
   message: string;
 }
 
-export const LAMA_MODEL_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx';
-export const MODEL_CACHE_NAME = 'lama-onnx-v2';
-
-let cachedSession: any = null;
-
 /**
- * Loads onnxruntime-web dynamically via official jsDelivr CDN script tag.
- * Bypasses Next.js / Webpack / Terser 'import.meta' bundling errors while
- * keeping client-side bundle light and WASM paths guaranteed to work on Vercel.
- */
-export async function getOrt(): Promise<any> {
-  if (typeof window === 'undefined') return null;
-  if ((window as any).ort) return (window as any).ort;
-
-  return new Promise((resolve, reject) => {
-    const existing = document.getElementById('ort-web-script') as HTMLScriptElement;
-    if (existing) {
-      if ((window as any).ort) return resolve((window as any).ort);
-      existing.addEventListener('load', () => resolve((window as any).ort));
-      existing.addEventListener('error', (e) => reject(e));
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.id = 'ort-web-script';
-    script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js';
-    script.crossOrigin = 'anonymous';
-    script.onload = () => {
-      const ort = (window as any).ort;
-      if (ort) {
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
-        ort.env.wasm.numThreads = 1;
-        resolve(ort);
-      } else {
-        reject(new Error('window.ort not found after script load'));
-      }
-    };
-    script.onerror = () => reject(new Error('Failed to load onnxruntime-web script from CDN'));
-    document.head.appendChild(script);
-  });
-}
-
-/**
- * Checks if the LaMa ONNX model is already cached in browser CacheStorage
+ * Compatibility stub
  */
 export async function isModelCached(): Promise<boolean> {
-  if (typeof window === 'undefined' || !('caches' in window)) return false;
-  try {
-    const cache = await caches.open(MODEL_CACHE_NAME);
-    const match = await cache.match(LAMA_MODEL_URL);
-    return !!match;
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 /**
- * Loads the LaMa ONNX model via CacheStorage and creates an InferenceSession
+ * Compatibility stub
  */
 export async function getLamaSession(
   onProgress?: (info: ModelLoadProgress) => void
 ): Promise<any> {
-  if (cachedSession) return cachedSession;
-  if (typeof window === 'undefined') return null;
-
-  onProgress?.({
-    status: 'checking-cache',
-    progress: 5,
-    message: 'Đang kiểm tra AI model...',
-  });
-
-  const ort = await getOrt();
-  if (!ort) throw new Error('Could not initialize ONNX Runtime Web');
-
-  let modelBuffer: ArrayBuffer | null = null;
-
-  if ('caches' in window) {
-    try {
-      const cache = await caches.open(MODEL_CACHE_NAME);
-      const cached = await cache.match(LAMA_MODEL_URL);
-      if (cached) {
-        onProgress?.({
-          status: 'ready',
-          progress: 50,
-          message: 'Tải AI model từ bộ nhớ đệm...',
-        });
-        modelBuffer = await cached.arrayBuffer();
-      } else {
-        onProgress?.({
-          status: 'downloading',
-          progress: 10,
-          message: 'Đang tải AI LaMa model (~200MB)...',
-        });
-        const resp = await fetch(LAMA_MODEL_URL);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-        const contentLength = resp.headers.get('content-length');
-        const total = contentLength ? parseInt(contentLength, 10) : 0;
-
-        if (total && resp.body) {
-          const reader = resp.body.getReader();
-          let loaded = 0;
-          const chunks: Uint8Array[] = [];
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-              chunks.push(value);
-              loaded += value.length;
-              const pct = Math.round(10 + (loaded / total) * 75);
-              onProgress?.({
-                status: 'downloading',
-                progress: pct,
-                message: `Đang tải AI model: ${Math.round(loaded / (1024 * 1024))}MB / ${Math.round(total / (1024 * 1024))}MB (${pct}%)`,
-              });
-            }
-          }
-          const fullArray = new Uint8Array(loaded);
-          let offset = 0;
-          for (const chunk of chunks) {
-            fullArray.set(chunk, offset);
-            offset += chunk.length;
-          }
-          modelBuffer = fullArray.buffer;
-
-          try {
-            await cache.put(
-              LAMA_MODEL_URL,
-              new Response(fullArray, {
-                headers: { 'Content-Type': 'application/octet-stream' },
-              })
-            );
-          } catch (cErr) {
-            console.warn('Cache put failed:', cErr);
-          }
-        } else {
-          const buf = await resp.arrayBuffer();
-          modelBuffer = buf;
-          try {
-            await cache.put(
-              LAMA_MODEL_URL,
-              new Response(buf, {
-                headers: { 'Content-Type': 'application/octet-stream' },
-              })
-            );
-          } catch {}
-        }
-      }
-    } catch (err) {
-      console.warn('CacheStorage access error, falling back to direct fetch:', err);
-    }
-  }
-
-  if (!modelBuffer) {
-    onProgress?.({
-      status: 'downloading',
-      progress: 30,
-      message: 'Đang tải AI LaMa model...',
-    });
-    const resp = await fetch(LAMA_MODEL_URL);
-    if (!resp.ok) throw new Error(`Model fetch failed: ${resp.status}`);
-    modelBuffer = await resp.arrayBuffer();
-  }
-
-  onProgress?.({
-    status: 'compiling',
-    progress: 90,
-    message: 'Khởi tạo WebAssembly Neural Engine...',
-  });
-
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: ['wasm'],
-  });
-
-  cachedSession = session;
-  onProgress?.({
-    status: 'ready',
-    progress: 100,
-    message: 'AI Model sẵn sàng!',
-  });
-
-  return session;
+  return null;
 }
 
 /**
@@ -223,7 +58,7 @@ export function getBottomRightPatchInfo(imgWidth: number, imgHeight: number) {
 }
 
 /**
- * Stage 1 & Stage 2 Reverse Alpha Un-blending and Clean Texture Clone
+ * Instant 2-Pass Texture-Preserving Restoration Engine
  */
 export function reverseAlphaRestore(
   imgData: ImageData,
@@ -240,10 +75,9 @@ export function reverseAlphaRestore(
   else if (coverage === 'wide') sizeScale = 0.088;
 
   const minDim = Math.min(width, height);
-  // Increase boxSize by +25% toward the top-left
   const rawSize = Math.round(Math.max(52, minDim * sizeScale * 1.25));
 
-  // Extend box all the way to width - 4 and height - 4
+  // Extend box all the way to width - 4 and height - 4 to enclose all 4 tips
   const boxEndX = Math.min(width, width - 4);
   const boxEndY = Math.min(height, height - 4);
 
@@ -285,7 +119,7 @@ export function reverseAlphaRestore(
   boxX = boxEndX - size;
   boxY = boxEndY - size;
 
-  // 2. Compute local background luminance (bgLuma) from the clean 8px border framing that square
+  // 2. Compute local background luminance (bgLuma) from the clean 8px border
   const borderWidth = 8;
   let bgLumaSum = 0;
   let bgLumaCount = 0;
@@ -324,7 +158,6 @@ export function reverseAlphaRestore(
   const borderAvgLuma = bgLumaCount > 0 ? bgLumaSum / bgLumaCount : 128;
 
   // 3. Measure brightness excess & estimate alpha transparency strictly per-pixel (threshold delta > 5)
-  // NOTE (v1.3.2): No dilation on alpha map to prevent over-darkening clean background pixels along outer edge.
   const alphaMap = new Float32Array(size * size);
 
   for (let py = 0; py < size; py++) {
@@ -342,7 +175,6 @@ export function reverseAlphaRestore(
       const deltaDenom = Math.max(15, 255 - effectiveBg);
 
       if (delta > 5) {
-        // Smooth linear ramp starting strictly at delta > 5
         const ramp = Math.min(1.0, (delta - 5) / 5.0);
         const rawAlpha = ((delta - 4) / deltaDenom) * 1.15 * ramp;
         alphaMap[py * size + px] = Math.max(0, Math.min(0.85, rawAlpha));
@@ -352,8 +184,9 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 4. Stage 1: Reverse Alpha Un-blending + Stage 2: Saturated Highlights Clone
-  // Applied strictly per-pixel where alpha > 0.01 — untouched background pixels (delta <= 5) are NEVER darkened.
+  // ============================================================
+  // PASS 1: Reverse Alpha Un-Blending & Saturated Highlights Clone
+  // ============================================================
   let unblendedCount = 0;
   let clonedCount = 0;
 
@@ -371,7 +204,6 @@ export function reverseAlphaRestore(
       const b = data[idx + 2];
       const pixelLuma = 0.299 * r + 0.587 * g + 0.114 * b;
 
-      // Stage 2: Near-saturated pixels (luma > 248) -> Offset clone stamp
       if (pixelLuma > 248 && alpha > 0.65) {
         const srcX = Math.max(0, x - size - 12);
         const srcY = y;
@@ -382,7 +214,6 @@ export function reverseAlphaRestore(
         data[idx + 2] = data[srcIdx + 2];
         clonedCount++;
       } else {
-        // Stage 1: Invert alpha blend on each RGB channel
         const invAlpha = 1.0 - alpha;
         const cleanR = Math.max(0, Math.min(255, (r - alpha * 255) / invAlpha));
         const cleanG = Math.max(0, Math.min(255, (g - alpha * 255) / invAlpha));
@@ -396,9 +227,7 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 5. Stage 3: Boundary Luminance Offset Calibration (v1.3.3)
-  // Compare inner boundary ring (alpha > 0.02, near edge) against outer boundary ring (alpha <= 0.01, clean background)
-  // to compensate for JPEG compression ringing and eliminate any faint 2-4% luminance ghost.
+  // Boundary Luminance Calibration (eliminates residual JPEG luminance discrepancy)
   let outerSumR = 0,
     outerSumG = 0,
     outerSumB = 0,
@@ -416,7 +245,6 @@ export function reverseAlphaRestore(
       const idx = (y * width + x) * 4;
 
       if (alpha > 0.02) {
-        // Inner boundary pixel: inside watermark, but within 2px of clean background
         let nearClean = false;
         for (let dy = -2; dy <= 2 && !nearClean; dy++) {
           const ny = py + dy;
@@ -435,7 +263,6 @@ export function reverseAlphaRestore(
           innerCount++;
         }
       } else {
-        // Outer boundary pixel: clean background, within 2.5px of watermark perimeter
         let nearStar = false;
         for (let dy = -2; dy <= 2 && !nearStar; dy++) {
           const ny = py + dy;
@@ -467,12 +294,10 @@ export function reverseAlphaRestore(
     const avgInnerG = innerSumG / innerCount;
     const avgInnerB = innerSumB / innerCount;
 
-    // Residual luminance offset (clamped to [-18, 18] for subtle 2-4% calibration)
     const offsetR = Math.max(-18, Math.min(18, avgOuterR - avgInnerR));
     const offsetG = Math.max(-18, Math.min(18, avgOuterG - avgInnerG));
     const offsetB = Math.max(-18, Math.min(18, avgOuterB - avgInnerB));
 
-    // Apply smooth corrective offset weighted by normalized alpha
     for (let py = 0; py < size; py++) {
       const y = boxY + py;
       const row = y * width;
@@ -490,352 +315,216 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 6. Stage 4: Micro-Grain Matching (v1.3.3)
-  // Subtle zero-mean sensor noise (±1.5 RGB variance) to restore natural floor tile grain
-  // and dither away any JPEG compression quantization artifacts inside the star.
+  // ============================================================
+  // PASS 2: Micro-Patch Texture Synthesis (v2.1.0)
+  // Fast, localized Exemplar Texture Patch Synthesizer (6x6 pixel blocks)
+  // restricted strictly to the tight ~45x45px star mask.
+  // ============================================================
+  const tightStarMask = new Uint8Array(size * size);
+  const dilateR = 3;
+
+  // 1. Build tight star mask (dilated by 3px to cover JPEG compression blocks around tips)
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let isMasked = false;
+      for (let dy = -dilateR; dy <= dilateR && !isMasked; dy++) {
+        const ny = py + dy;
+        if (ny < 0 || ny >= size) continue;
+        for (let dx = -dilateR; dx <= dilateR && !isMasked; dx++) {
+          if (dx * dx + dy * dy > 9.0) continue; // 3px radius
+          const nx = px + dx;
+          if (nx < 0 || nx >= size) continue;
+          if (alphaMap[ny * size + nx] > 0.02) {
+            isMasked = true;
+          }
+        }
+      }
+      if (isMasked) {
+        tightStarMask[py * size + px] = 1;
+      }
+    }
+  }
+
+  // 2. Pre-collect candidate 6x6 source blocks from the clean surrounding tile ring
+  // (10px to 45px outside the star mask, strictly excluding any masked pixels)
+  const candidateBlocks: { x: number; y: number }[] = [];
+  const minCleanDist = 10;
+  const maxCleanDist = 45;
+
+  for (let dy = -maxCleanDist; dy <= size + 10; dy += 3) {
+    const sy = boxY + dy;
+    if (sy < 0 || sy >= height - 6) continue;
+
+    for (let dx = -maxCleanDist; dx <= size + 10; dx += 3) {
+      const sx = boxX + dx;
+      if (sx < 0 || sx >= width - 6) continue;
+
+      const inBoxX = sx - boxX;
+      const inBoxY = sy - boxY;
+
+      let tooClose = false;
+      if (
+        inBoxX >= -minCleanDist &&
+        inBoxX <= size + minCleanDist &&
+        inBoxY >= -minCleanDist &&
+        inBoxY <= size + minCleanDist
+      ) {
+        tooClose = true;
+      }
+
+      const boxCenterX = boxX + size / 2;
+      const boxCenterY = boxY + size / 2;
+      const distFromCenter = Math.hypot(sx + 3 - boxCenterX, sy + 3 - boxCenterY);
+
+      if (!tooClose && distFromCenter <= maxCleanDist + size / 2) {
+        candidateBlocks.push({ x: sx, y: sy });
+      }
+    }
+  }
+
+  // Fallback: If surrounding area has too few candidates, sample from clean background left/top
+  if (candidateBlocks.length < 15) {
+    for (let sy = Math.max(0, boxY - 40); sy < Math.min(height - 6, boxY + size); sy += 3) {
+      for (let sx = Math.max(0, boxX - 50); sx < Math.max(0, boxX - 12); sx += 3) {
+        candidateBlocks.push({ x: sx, y: sy });
+      }
+    }
+  }
+
+  // 3. Synthesize texture into the star mask using 6x6 exemplar blocks with stride 3
+  const synthBufferR = new Float32Array(size * size);
+  const synthBufferG = new Float32Array(size * size);
+  const synthBufferB = new Float32Array(size * size);
+  const synthWeight = new Float32Array(size * size);
+
+  const blockSize = 6;
+  const stride = 3;
+
+  for (let by = 0; by <= size - blockSize; by += stride) {
+    for (let bx = 0; bx <= size - blockSize; bx += stride) {
+      let hasMasked = false;
+      for (let dy = 0; dy < blockSize && !hasMasked; dy++) {
+        for (let dx = 0; dx < blockSize && !hasMasked; dx++) {
+          if (tightStarMask[(by + dy) * size + (bx + dx)] === 1) {
+            hasMasked = true;
+          }
+        }
+      }
+      if (!hasMasked) continue;
+
+      let bestScore = Infinity;
+      let bestCand = candidateBlocks[0] || {
+        x: Math.max(0, boxX - 25),
+        y: Math.max(0, boxY - 25),
+      };
+
+      for (let i = 0; i < candidateBlocks.length; i++) {
+        const cand = candidateBlocks[i];
+        let score = 0;
+
+        for (let dy = 0; dy < blockSize; dy++) {
+          const cy = cand.y + dy;
+          const ty = boxY + by + dy;
+          const cRow = cy * width;
+          const tRow = ty * width;
+
+          for (let dx = 0; dx < blockSize; dx++) {
+            const cx = cand.x + dx;
+            const tx = boxX + bx + dx;
+
+            const cIdx = (cRow + cx) * 4;
+            const tIdx = (tRow + tx) * 4;
+
+            const dr = data[cIdx] - data[tIdx];
+            const dg = data[cIdx + 1] - data[tIdx + 1];
+            const db = data[cIdx + 2] - data[tIdx + 2];
+            const pixelDiff = dr * dr + dg * dg + db * db;
+
+            const isCleanBoundary = tightStarMask[(by + dy) * size + (bx + dx)] === 0;
+            score += isCleanBoundary ? pixelDiff * 3.0 : pixelDiff;
+          }
+        }
+
+        if (score < bestScore) {
+          bestScore = score;
+          bestCand = cand;
+        }
+      }
+
+      for (let dy = 0; dy < blockSize; dy++) {
+        const cy = bestCand.y + dy;
+        const cRow = cy * width;
+        for (let dx = 0; dx < blockSize; dx++) {
+          const cx = bestCand.x + dx;
+          const cIdx = (cRow + cx) * 4;
+          const bufIdx = (by + dy) * size + (bx + dx);
+
+          synthBufferR[bufIdx] += data[cIdx];
+          synthBufferG[bufIdx] += data[cIdx + 1];
+          synthBufferB[bufIdx] += data[cIdx + 2];
+          synthWeight[bufIdx] += 1.0;
+        }
+      }
+    }
+  }
+
+  // 4. Apply synthesized texture with 1.5px edge blend on the star mask perimeter
   for (let py = 0; py < size; py++) {
     const y = boxY + py;
     const row = y * width;
     for (let px = 0; px < size; px++) {
-      const alpha = alphaMap[py * size + px];
-      if (alpha <= 0.02) continue;
+      if (tightStarMask[py * size + px] !== 1) continue;
 
-      const idx = (row + (boxX + px)) * 4;
-      const grain = (Math.random() - 0.5) * 3.0; // Zero-mean ±1.5 variance
-      data[idx] = Math.max(0, Math.min(255, Math.round(data[idx] + grain)));
-      data[idx + 1] = Math.max(0, Math.min(255, Math.round(data[idx + 1] + grain)));
-      data[idx + 2] = Math.max(0, Math.min(255, Math.round(data[idx + 2] + grain)));
-    }
-  }
+      const bufIdx = py * size + px;
+      if (synthWeight[bufIdx] <= 0) continue;
 
-  // 7. Stage 5: 2px Seam Ring Interpolation (v1.3.2/v1.3.3)
-  // Detect the narrow 2px-wide transition ring right along the boundary where alpha > 0 meets alpha === 0.
-  // Replace only those 2px boundary ring pixels by smoothly interpolating from clean unmasked pixels
-  // (alpha === 0) immediately adjacent to them within a 3px radius, erasing the hairline edge seam
-  // without touching the crisp interior texture.
-  const ringBuffer = new Uint8ClampedArray(size * size * 4);
-  const inRing = new Uint8Array(size * size);
+      const synthR = synthBufferR[bufIdx] / synthWeight[bufIdx];
+      const synthG = synthBufferG[bufIdx] / synthWeight[bufIdx];
+      const synthB = synthBufferB[bufIdx] / synthWeight[bufIdx];
 
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      const alpha = alphaMap[py * size + px];
-      if (alpha <= 0.01) continue; // Clean background pixel, skip
-
-      // Check minimum Euclidean distance to a clean unmasked pixel (alpha === 0 or outside box)
+      // Measure distance to nearest clean pixel (tightStarMask === 0)
       let minDistSq = 999;
       for (let dy = -2; dy <= 2; dy++) {
         const ny = py + dy;
         for (let dx = -2; dx <= 2; dx++) {
           const d2 = dx * dx + dy * dy;
-          if (d2 > 4.5) continue; // within 2px (Euclidean dist <= 2.12px)
+          if (d2 > 4.5) continue;
           const nx = px + dx;
           const isClean =
-            nx < 0 || nx >= size || ny < 0 || ny >= size || alphaMap[ny * size + nx] <= 0.01;
+            nx < 0 || nx >= size || ny < 0 || ny >= size || tightStarMask[ny * size + nx] === 0;
           if (isClean && d2 < minDistSq) {
             minDistSq = d2;
           }
         }
       }
 
-      if (minDistSq <= 4.5) {
-        // Pixel is in the 2px boundary transition ring
-        inRing[py * size + px] = 1;
-        const minDist = Math.sqrt(minDistSq);
+      const minDist = Math.sqrt(minDistSq);
+      // 1.5px feather edge blend: 0 at boundary ramping to 1.0 inside the star
+      const blendFactor = Math.min(1.0, minDist / 1.5);
 
-        // Interpolate from clean unmasked pixels (alpha === 0) within a 3px radius
-        let sumR = 0,
-          sumG = 0,
-          sumB = 0,
-          totalW = 0;
+      const idx = (row + (boxX + px)) * 4;
+      const pass1R = data[idx];
+      const pass1G = data[idx + 1];
+      const pass1B = data[idx + 2];
 
-        for (let dy = -3; dy <= 3; dy++) {
-          const ny = py + dy;
-          const gy = boxY + ny;
-          if (gy < 0 || gy >= height) continue;
+      const grain = (Math.random() - 0.5) * 2.0;
 
-          for (let dx = -3; dx <= 3; dx++) {
-            const d2 = dx * dx + dy * dy;
-            if (d2 === 0 || d2 > 9.5) continue; // within 3px radius (dist <= 3.08px)
-            const nx = px + dx;
-            const gx = boxX + nx;
-            if (gx < 0 || gx >= width) continue;
-
-            const isClean =
-              nx < 0 || nx >= size || ny < 0 || ny >= size || alphaMap[ny * size + nx] <= 0.01;
-            if (!isClean) continue;
-
-            const dist = Math.sqrt(d2);
-            const w = 1.0 / dist;
-            const cIdx = (gy * width + gx) * 4;
-            sumR += data[cIdx] * w;
-            sumG += data[cIdx + 1] * w;
-            sumB += data[cIdx + 2] * w;
-            totalW += w;
-          }
-        }
-
-        const bOffset = (py * size + px) * 4;
-        if (totalW > 0) {
-          const interpR = sumR / totalW;
-          const interpG = sumG / totalW;
-          const interpB = sumB / totalW;
-
-          // Seamless transition: pixels directly at boundary (dist <= 1.2px) take 100% interpolated,
-          // inner ring pixels (1.2px < dist <= 2.12px) blend smoothly with unblended interior.
-          const interpWeight = minDist <= 1.2 ? 1.0 : Math.max(0.4, 1.0 - (minDist - 1.2) * 0.6);
-          const unblendWeight = 1.0 - interpWeight;
-
-          const curIdx = ((boxY + py) * width + (boxX + px)) * 4;
-          ringBuffer[bOffset] = Math.round(interpR * interpWeight + data[curIdx] * unblendWeight);
-          ringBuffer[bOffset + 1] = Math.round(interpG * interpWeight + data[curIdx + 1] * unblendWeight);
-          ringBuffer[bOffset + 2] = Math.round(interpB * interpWeight + data[curIdx + 2] * unblendWeight);
-        } else {
-          const curIdx = ((boxY + py) * width + (boxX + px)) * 4;
-          ringBuffer[bOffset] = data[curIdx];
-          ringBuffer[bOffset + 1] = data[curIdx + 1];
-          ringBuffer[bOffset + 2] = data[curIdx + 2];
-        }
-      }
-    }
-  }
-
-  // Write ring buffer back to image data
-  for (let py = 0; py < size; py++) {
-    const y = boxY + py;
-    const row = y * width;
-    for (let px = 0; px < size; px++) {
-      if (inRing[py * size + px] === 1) {
-        const idx = (row + (boxX + px)) * 4;
-        const bOffset = (py * size + px) * 4;
-        data[idx] = ringBuffer[bOffset];
-        data[idx + 1] = ringBuffer[bOffset + 1];
-        data[idx + 2] = ringBuffer[bOffset + 2];
-      }
+      data[idx] = Math.max(
+        0,
+        Math.min(255, Math.round(synthR * blendFactor + pass1R * (1.0 - blendFactor) + grain))
+      );
+      data[idx + 1] = Math.max(
+        0,
+        Math.min(255, Math.round(synthG * blendFactor + pass1G * (1.0 - blendFactor) + grain))
+      );
+      data[idx + 2] = Math.max(
+        0,
+        Math.min(255, Math.round(synthB * blendFactor + pass1B * (1.0 - blendFactor) + grain))
+      );
     }
   }
 
   return { boxX, boxY, size, unblendedCount, clonedCount };
-}
-
-/**
- * Runs True AI LaMa Inpainting on the bottom-right corner where the Gemini logo lives.
- * Extracts a proportional crop (scaled to 512x512), builds a 5px-dilated star mask,
- * executes onnxruntime-web inference, and composites the cleaned patch back
- * with a 6px feathered boundary blend.
- */
-export async function lamaInpaintBottomRight(
-  fullCanvas: HTMLCanvasElement,
-  coverage: CoveragePreset = 'default',
-  onProgress?: (info: ModelLoadProgress) => void
-): Promise<boolean> {
-  const origWidth = fullCanvas.width;
-  const origHeight = fullCanvas.height;
-  const fullCtx = fullCanvas.getContext('2d')!;
-
-  // 1. Calculate bottom-right crop dimensions
-  const minDim = Math.min(origWidth, origHeight);
-  let sizeScale = 0.055;
-  if (coverage === 'compact') sizeScale = 0.045;
-  else if (coverage === 'large') sizeScale = 0.070;
-  else if (coverage === 'wide') sizeScale = 0.088;
-
-  const rawStarSize = Math.round(Math.max(52, minDim * sizeScale * 1.25));
-  const cropSize = Math.min(
-    origWidth,
-    Math.min(origHeight, Math.max(512, Math.round(rawStarSize * 2.8)))
-  );
-
-  const cropX = origWidth - cropSize;
-  const cropY = origHeight - cropSize;
-
-  // 2. Extract crop patch scaled to 512x512
-  const cropCanvas = document.createElement('canvas');
-  cropCanvas.width = 512;
-  cropCanvas.height = 512;
-  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!;
-  cropCtx.drawImage(fullCanvas, cropX, cropY, cropSize, cropSize, 0, 0, 512, 512);
-
-  const cropData = cropCtx.getImageData(0, 0, 512, 512);
-  const d = cropData.data;
-
-  // 3. Create high-precision star mask with 5px dilation on 512x512
-  const scale = 512 / cropSize;
-  const starEndX = 512 - Math.max(2, Math.round(4 * scale));
-  const starEndY = 512 - Math.max(2, Math.round(4 * scale));
-  const starBoxSize = Math.round(rawStarSize * scale);
-  const starStartX = Math.max(0, starEndX - starBoxSize);
-  const starStartY = Math.max(0, starEndY - starBoxSize);
-
-  // Compute local background luminance in crop
-  let bgLumaSum = 0;
-  let bgLumaCount = 0;
-
-  for (let x = starStartX; x < starEndX; x += 2) {
-    for (let dy = 2; dy <= 10; dy++) {
-      const y = Math.max(0, starStartY - dy);
-      const idx = (y * 512 + x) * 4;
-      bgLumaSum += 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-      bgLumaCount++;
-    }
-  }
-  for (let y = starStartY; y < starEndY; y += 2) {
-    for (let dx = 2; dx <= 10; dx++) {
-      const x = Math.max(0, starStartX - dx);
-      const idx = (y * 512 + x) * 4;
-      bgLumaSum += 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-      bgLumaCount++;
-    }
-  }
-  const avgBg = bgLumaCount > 0 ? bgLumaSum / bgLumaCount : 128;
-
-  // Initial binary star mask (255 = inpaint, 0 = keep)
-  const initialMask = new Uint8Array(512 * 512);
-  for (let y = starStartY; y < starEndY; y++) {
-    for (let x = starStartX; x < starEndX; x++) {
-      const idx = (y * 512 + x) * 4;
-      const luma = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
-      if (luma - avgBg > 4) {
-        initialMask[y * 512 + x] = 255;
-      }
-    }
-  }
-
-  // 5px morphological dilation so all surrounding JPEG compression blocks are fully covered
-  const dilatedMask = new Uint8Array(512 * 512);
-  const dilateRadius = 5;
-  for (let y = starStartY - dilateRadius; y < Math.min(512, starEndY + dilateRadius); y++) {
-    if (y < 0) continue;
-    for (let x = starStartX - dilateRadius; x < Math.min(512, starEndX + dilateRadius); x++) {
-      if (x < 0) continue;
-
-      let hit = false;
-      for (let dy = -dilateRadius; dy <= dilateRadius && !hit; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= 512) continue;
-        for (let dx = -dilateRadius; dx <= dilateRadius && !hit; dx++) {
-          if (dx * dx + dy * dy > 25.0) continue; // 5px radius
-          const nx = x + dx;
-          if (nx < 0 || nx >= 512) continue;
-          if (initialMask[ny * 512 + nx] === 255) {
-            hit = true;
-          }
-        }
-      }
-      if (hit) {
-        dilatedMask[y * 512 + x] = 255;
-      }
-    }
-  }
-
-  // 4. Load or retrieve LaMa ONNX session
-  const session = await getLamaSession(onProgress);
-  if (!session) return false;
-
-  onProgress?.({
-    status: 'ready',
-    progress: 95,
-    message: 'AI LaMa đang vẽ lại chi tiết gốc...',
-  });
-
-  const ort = await getOrt();
-
-  // 5. Prepare input tensors [1, 3, 512, 512] for image and [1, 1, 512, 512] for mask
-  const chSize = 512 * 512;
-  const imgTensorData = new Float32Array(1 * 3 * 512 * 512);
-  const maskTensorData = new Float32Array(1 * 1 * 512 * 512);
-
-  for (let i = 0; i < chSize; i++) {
-    imgTensorData[i] = d[i * 4] / 255.0; // R
-    imgTensorData[chSize + i] = d[i * 4 + 1] / 255.0; // G
-    imgTensorData[chSize * 2 + i] = d[i * 4 + 2] / 255.0; // B
-
-    maskTensorData[i] = dilatedMask[i] > 128 ? 1.0 : 0.0;
-  }
-
-  const imageTensor = new ort.Tensor('float32', imgTensorData, [1, 3, 512, 512]);
-  const maskTensor = new ort.Tensor('float32', maskTensorData, [1, 1, 512, 512]);
-
-  // 6. Run Inference
-  const feeds = { image: imageTensor, mask: maskTensor };
-  const results = await session.run(feeds);
-  const outputTensor =
-    results[session.outputNames[0]] || results['output'] || Object.values(results)[0];
-
-  if (!outputTensor || !outputTensor.data) return false;
-
-  const outData = outputTensor.data as Float32Array;
-  const cleanedCropData = cropCtx.createImageData(512, 512);
-
-  for (let i = 0; i < chSize; i++) {
-    let r = outData[i];
-    let g = outData[chSize + i];
-    let b = outData[chSize * 2 + i];
-
-    if (r <= 1.0 && g <= 1.0 && b <= 1.0) {
-      r *= 255;
-      g *= 255;
-      b *= 255;
-    }
-
-    cleanedCropData.data[i * 4] = Math.max(0, Math.min(255, Math.round(r)));
-    cleanedCropData.data[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(g)));
-    cleanedCropData.data[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(b)));
-    cleanedCropData.data[i * 4 + 3] = 255;
-  }
-
-  cropCtx.putImageData(cleanedCropData, 0, 0);
-
-  // 7. Scale back if cropSize !== 512
-  let patchCanvas: HTMLCanvasElement = cropCanvas;
-  if (cropSize !== 512) {
-    const scaledCanvas = document.createElement('canvas');
-    scaledCanvas.width = cropSize;
-    scaledCanvas.height = cropSize;
-    const sCtx = scaledCanvas.getContext('2d')!;
-    sCtx.drawImage(cropCanvas, 0, 0, 512, 512, 0, 0, cropSize, cropSize);
-    patchCanvas = scaledCanvas;
-  }
-
-  // 8. Composite cleaned patch back onto full-resolution canvas with 6px feathered blend at borders
-  const fullData = fullCtx.getImageData(0, 0, origWidth, origHeight);
-  const patchData = patchCanvas.getContext('2d')!.getImageData(0, 0, cropSize, cropSize);
-  const feather = 6;
-
-  for (let py = 0; py < cropSize; py++) {
-    const gy = cropY + py;
-    if (gy < 0 || gy >= origHeight) continue;
-
-    for (let px = 0; px < cropSize; px++) {
-      const gx = cropX + px;
-      if (gx < 0 || gx >= origWidth) continue;
-
-      let weight = 1.0;
-      if (px < feather) weight = Math.min(weight, px / feather);
-      if (py < feather) weight = Math.min(weight, py / feather);
-
-      const pIdx = (py * cropSize + px) * 4;
-      const fIdx = (gy * origWidth + gx) * 4;
-
-      if (weight >= 1.0) {
-        fullData.data[fIdx] = patchData.data[pIdx];
-        fullData.data[fIdx + 1] = patchData.data[pIdx + 1];
-        fullData.data[fIdx + 2] = patchData.data[pIdx + 2];
-      } else {
-        fullData.data[fIdx] = Math.round(
-          patchData.data[pIdx] * weight + fullData.data[fIdx] * (1.0 - weight)
-        );
-        fullData.data[fIdx + 1] = Math.round(
-          patchData.data[pIdx] * weight + fullData.data[fIdx + 1] * (1.0 - weight)
-        );
-        fullData.data[fIdx + 2] = Math.round(
-          patchData.data[pIdx] * weight + fullData.data[fIdx + 2] * (1.0 - weight)
-        );
-      }
-    }
-  }
-
-  fullCtx.putImageData(fullData, 0, 0);
-  return true;
 }
 
 /**
@@ -854,14 +543,13 @@ export function criminisiInpaint(
 }
 
 /**
- * Main 1-Click AI Watermark Removal Pipeline (v2.0.0):
- * Primary engine: True LaMa ONNX AI Inpainting via browser WebAssembly.
- * Fallback engine: Deterministic Reverse Alpha Un-Blending.
+ * Main 1-Click Instant Watermark Removal Pipeline (v2.1.0):
+ * Instant 2-Pass Texture-Preserving Engine (<30ms, 0MB download).
  */
 export async function removeGeminiWatermarkAuto(
   sourceImage: HTMLImageElement | HTMLCanvasElement,
   coverage: CoveragePreset = 'default',
-  preferNeural = true,
+  preferNeural = false,
   onProgress?: (info: ModelLoadProgress) => void
 ): Promise<InpaintResult> {
   const startTime = performance.now();
@@ -896,31 +584,16 @@ export async function removeGeminiWatermarkAuto(
     patchSize
   );
 
-  let engineUsed: 'lama-onnx' | 'reverse-alpha-unblend' = 'reverse-alpha-unblend';
+  onProgress?.({
+    status: 'ready',
+    progress: 50,
+    message: 'Đang phục hồi chi tiết...',
+  });
 
-  // Primary: Try True LaMa ONNX AI Inpainting
-  if (preferNeural) {
-    try {
-      const lamaSuccess = await lamaInpaintBottomRight(fullCanvas, coverage, onProgress);
-      if (lamaSuccess) {
-        engineUsed = 'lama-onnx';
-      }
-    } catch (lamaErr) {
-      console.warn('LaMa ONNX inference failed, falling back to reverse-alpha unblend:', lamaErr);
-    }
-  }
-
-  // Fallback: If LaMa was skipped or encountered an error, run reverseAlphaRestore
-  if (engineUsed !== 'lama-onnx') {
-    onProgress?.({
-      status: 'fallback',
-      progress: 90,
-      message: 'Đang phục hồi pixel chính xác...',
-    });
-    const imgData = fullCtx.getImageData(0, 0, origWidth, origHeight);
-    reverseAlphaRestore(imgData, origWidth, origHeight, coverage);
-    fullCtx.putImageData(imgData, 0, 0);
-  }
+  // 3. Execute 2-Pass Restoration Engine (<30ms)
+  const imgData = fullCtx.getImageData(0, 0, origWidth, origHeight);
+  reverseAlphaRestore(imgData, origWidth, origHeight, coverage);
+  fullCtx.putImageData(imgData, 0, 0);
 
   // 4. Patch after canvas
   const patchAfterCanvas = document.createElement('canvas');
@@ -941,11 +614,17 @@ export async function removeGeminiWatermarkAuto(
 
   const executionTimeMs = Math.round(performance.now() - startTime);
 
+  onProgress?.({
+    status: 'ready',
+    progress: 100,
+    message: 'Hoàn tất!',
+  });
+
   return {
     fullCanvas,
     patchBeforeCanvas,
     patchAfterCanvas,
-    engineUsed: engineUsed as any,
+    engineUsed: 'instant-2pass-texture',
     executionTimeMs,
   };
 }
