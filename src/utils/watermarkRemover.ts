@@ -4,7 +4,7 @@
 // reproducing 100% sharp textures and grain with zero blur.
 // ============================================================
 
-import { criminisiInpaint } from './aiWatermarkRemover';
+import { reverseAlphaRestore } from './aiWatermarkRemover';
 
 export interface BoundingBox {
   x: number;
@@ -158,13 +158,8 @@ export async function inpaintImage(
     return copy;
   }
 
-  // 4. Sharp Exemplar-Based Texture Synthesis (Criminisi)
-  // Copies real neighboring pixel patches (SSD over known pixels)
-  // strictly excluding any sample from the watermark region.
-  criminisiInpaint(patchImageData, patchMask, cropW, cropH, 3, 65, {
-    minX: minX - cropX,
-    minY: minY - cropY,
-  });
+  // 4. Reverse Alpha Un-blending & Seamless Texture Clone (Stage 1 & Stage 2)
+  reverseAlphaRestore(patchImageData, cropW, cropH, 'default');
 
   // 5. Write back to output canvas at full original resolution
   const outCanvas = document.createElement('canvas');
