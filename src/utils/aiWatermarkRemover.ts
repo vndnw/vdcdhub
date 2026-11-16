@@ -223,66 +223,83 @@ export async function getLamaSession(
 }
 
 /**
- * Calculates bottom-right crop patch coordinates and dimensions
+ * Calculates bottom-right crop patch coordinates and dimensions.
+ * Kept tight around the bottom-right corner to maintain high performance.
  */
 export function getBottomRightPatchInfo(imgWidth: number, imgHeight: number) {
-  // Proportional patch size (e.g. 18% of min dimension, bounded between 256 and 512)
-  const patchSize = Math.min(512, Math.max(256, Math.round(Math.min(imgWidth, imgHeight) * 0.2)));
+  // Proportional patch size (e.g. 16% of min dimension, bounded between 160 and 384)
+  const patchSize = Math.min(384, Math.max(160, Math.round(Math.min(imgWidth, imgHeight) * 0.16)));
   const x = imgWidth - patchSize;
   const y = imgHeight - patchSize;
   return { x, y, size: patchSize };
 }
 
 /**
- * Generates the binary mask inside the bottom-right patch based on the coverage preset
+ * Generates the binary mask inside the bottom-right patch.
+ * Tightly targets ONLY the actual Gemini 4-point star watermark icon (~4.5%-5.5% size, ~1.5% margin)
+ * instead of a large blurry square block.
  */
-export function generatePatchMask(patchSize: number, coverage: CoveragePreset): Uint8Array {
+export function generatePatchMask(
+  patchSize: number,
+  coverage: CoveragePreset = 'default',
+  origWidth?: number,
+  origHeight?: number
+): Uint8Array {
   const mask = new Uint8Array(patchSize * patchSize);
 
-  // Gemini star is located in the bottom-right quadrant of this patch
-  let boxFractionW = 0.38;
-  let boxFractionH = 0.38;
-  let marginFractionX = 0.16;
-  let marginFractionY = 0.16;
+  // Gemini star scale relative to full image dimension
+  let starFraction = 0.048; // ~4.8% of min dimension
+  let marginFraction = 0.015; // ~1.5% margin from bottom and right edges
 
   switch (coverage) {
     case 'compact':
-      boxFractionW = 0.26;
-      boxFractionH = 0.26;
-      marginFractionX = 0.14;
-      marginFractionY = 0.14;
+      starFraction = 0.042;
+      marginFraction = 0.013;
       break;
     case 'large':
-      boxFractionW = 0.52;
-      boxFractionH = 0.52;
-      marginFractionX = 0.18;
-      marginFractionY = 0.18;
+      starFraction = 0.058;
+      marginFraction = 0.016;
       break;
     case 'wide':
-      boxFractionW = 0.68;
-      boxFractionH = 0.42;
-      marginFractionX = 0.18;
-      marginFractionY = 0.15;
+      starFraction = 0.075;
+      marginFraction = 0.015;
       break;
     case 'default':
     default:
-      boxFractionW = 0.38;
-      boxFractionH = 0.38;
-      marginFractionX = 0.16;
-      marginFractionY = 0.16;
+      starFraction = 0.048;
+      marginFraction = 0.015;
       break;
   }
 
-  const boxW = Math.round(patchSize * boxFractionW);
-  const boxH = Math.round(patchSize * boxFractionH);
-  const startX = patchSize - Math.round(patchSize * marginFractionX) - boxW;
-  const startY = patchSize - Math.round(patchSize * marginFractionY) - boxH;
+  // Calculate pixel sizes
+  let starW: number;
+  let starH: number;
+  let marginRight: number;
+  let marginBottom: number;
 
-  const endX = Math.min(patchSize, startX + boxW);
-  const endY = Math.min(patchSize, startY + boxH);
+  if (origWidth && origHeight) {
+    const minDim = Math.min(origWidth, origHeight);
+    starW = Math.max(20, Math.round(minDim * starFraction));
+    starH = starW;
+    marginRight = Math.max(8, Math.round(origWidth * marginFraction));
+    marginBottom = Math.max(8, Math.round(origHeight * marginFraction));
+  } else {
+    // If original image dimensions not passed, derive from patchSize assuming patch is ~16% of minDim
+    const estimatedMinDim = patchSize / 0.16;
+    starW = Math.max(20, Math.round(estimatedMinDim * starFraction));
+    starH = starW;
+    marginRight = Math.max(8, Math.round(estimatedMinDim * marginFraction));
+    marginBottom = Math.max(8, Math.round(estimatedMinDim * marginFraction));
+  }
 
-  // Dilate by 5px
-  const dilation = 5;
+  // Tightly positioned in bottom-right corner of the patch
+  const startX = Math.max(0, patchSize - marginRight - starW);
+  const startY = Math.max(0, patchSize - marginBottom - starH);
+  const endX = Math.min(patchSize, startX + starW);
+  const endY = Math.min(patchSize, startY + starH);
+
+  // Micro-dilation of 2px to ensure 4-point star tips are fully covered with zero halo
+  const dilation = 2;
   const dilStartX = Math.max(0, startX - dilation);
   const dilStartY = Math.max(0, startY - dilation);
   const dilEndX = Math.min(patchSize, endX + dilation);
@@ -299,7 +316,334 @@ export function generatePatchMask(patchSize: number, coverage: CoveragePreset): 
 }
 
 /**
- * Fast, high-quality Exemplar & PatchMatch Texture Synthesis Inpainting Fallback
+ * Criminisi Exemplar-Based Texture Synthesis Engine
+ * Replaces hole pixels by finding the best matching sharp source patch
+ * in the surrounding known neighborhood (SSD over known pixels),
+ * completely eliminating blurry smudges.
+ */
+export function criminisiInpaint(
+  imgData: ImageData,
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  patchRadius = 3,
+  searchRadius = 45
+): void {
+  const data = imgData.data;
+  const numPixels = width * height;
+
+  const holeMask = new Uint8Array(numPixels);
+  const origHoleMask = new Uint8Array(numPixels);
+  const confidence = new Float32Array(numPixels);
+
+  let remainingHoles = 0;
+  for (let i = 0; i < numPixels; i++) {
+    if (mask[i] > 0) {
+      holeMask[i] = 1;
+      origHoleMask[i] = 1;
+      confidence[i] = 0.0;
+      remainingHoles++;
+    } else {
+      holeMask[i] = 0;
+      origHoleMask[i] = 0;
+      confidence[i] = 1.0;
+    }
+  }
+
+  if (remainingHoles === 0) return;
+
+  const r = Math.max(2, Math.min(5, patchRadius));
+  const patchDim = 2 * r + 1;
+  const maxPatchPixels = patchDim * patchDim;
+
+  // Compute luminance array for gradient / isophote calculation
+  const lum = new Float32Array(numPixels);
+  for (let i = 0; i < numPixels; i++) {
+    const p = i * 4;
+    lum[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+  }
+
+  let iterations = 0;
+  const maxIterations = 800;
+
+  while (remainingHoles > 0 && iterations < maxIterations) {
+    iterations++;
+
+    // 1. Find boundary pixels (hole pixels having at least one 4-connected known neighbor)
+    const boundaryX: number[] = [];
+    const boundaryY: number[] = [];
+
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        const idx = row + x;
+        if (holeMask[idx] === 1) {
+          const hasKnownNeighbor =
+            (x > 0 && holeMask[idx - 1] === 0) ||
+            (x < width - 1 && holeMask[idx + 1] === 0) ||
+            (y > 0 && holeMask[idx - width] === 0) ||
+            (y < height - 1 && holeMask[idx + width] === 0);
+
+          if (hasKnownNeighbor) {
+            boundaryX.push(x);
+            boundaryY.push(y);
+          }
+        }
+      }
+    }
+
+    if (boundaryX.length === 0) break;
+
+    // 2. Compute priority for each boundary point: P(p) = C(p) * D(p)
+    let bestPriority = -1;
+    let bestTargetX = boundaryX[0];
+    let bestTargetY = boundaryY[0];
+    let bestTargetConf = 0.5;
+
+    for (let b = 0; b < boundaryX.length; b++) {
+      const bx = boundaryX[b];
+      const by = boundaryY[b];
+
+      // Confidence term C(p)
+      let sumConf = 0;
+      let knownCount = 0;
+
+      const minY = Math.max(0, by - r);
+      const maxY = Math.min(height - 1, by + r);
+      const minX = Math.max(0, bx - r);
+      const maxX = Math.min(width - 1, bx + r);
+
+      for (let py = minY; py <= maxY; py++) {
+        const pRow = py * width;
+        for (let px = minX; px <= maxX; px++) {
+          const pIdx = pRow + px;
+          if (holeMask[pIdx] === 0) {
+            sumConf += confidence[pIdx];
+            knownCount++;
+          }
+        }
+      }
+
+      const conf = sumConf / maxPatchPixels;
+
+      // Data term D(p) with isophote and boundary normal
+      let gradX = 0;
+      let gradY = 0;
+      if (bx > 0 && bx < width - 1) {
+        gradX = (lum[by * width + bx + 1] - lum[by * width + bx - 1]) * 0.5;
+      }
+      if (by > 0 && by < height - 1) {
+        gradY = (lum[(by + 1) * width + bx] - lum[(by - 1) * width + bx]) * 0.5;
+      }
+
+      let nx = 0;
+      let ny = 0;
+      if (bx > 0 && holeMask[by * width + bx - 1] === 0) nx -= 1;
+      if (bx < width - 1 && holeMask[by * width + bx + 1] === 0) nx += 1;
+      if (by > 0 && holeMask[(by - 1) * width + bx] === 0) ny -= 1;
+      if (by < height - 1 && holeMask[(by + 1) * width + bx] === 0) ny += 1;
+
+      const normLen = Math.sqrt(nx * nx + ny * ny) || 1;
+      nx /= normLen;
+      ny /= normLen;
+
+      const isophoteDotNormal = Math.abs(-gradY * nx + gradX * ny);
+      const dataTerm = (isophoteDotNormal / 255.0) + 0.15;
+
+      const priority = conf * dataTerm * (1.0 + knownCount / maxPatchPixels);
+
+      if (priority > bestPriority) {
+        bestPriority = priority;
+        bestTargetX = bx;
+        bestTargetY = by;
+        bestTargetConf = conf;
+      }
+    }
+
+    // 3. Find best exemplar source patch in known neighborhood
+    const targetX = bestTargetX;
+    const targetY = bestTargetY;
+
+    const sMinX = Math.max(r, targetX - searchRadius);
+    const sMaxX = Math.min(width - 1 - r, targetX + searchRadius);
+    const sMinY = Math.max(r, targetY - searchRadius);
+    const sMaxY = Math.min(height - 1 - r, targetY + searchRadius);
+
+    let bestScore = Infinity;
+    let bestSrcX = -1;
+    let bestSrcY = -1;
+
+    for (let sy = sMinY; sy <= sMaxY; sy++) {
+      const sRow = sy * width;
+
+      for (let sx = sMinX; sx <= sMaxX; sx++) {
+        if (holeMask[sRow + sx] === 1) continue;
+
+        // Ensure candidate patch is 100% known source pixels
+        let isPureKnown = true;
+        for (let dy = -r; dy <= r; dy++) {
+          const checkRow = (sy + dy) * width;
+          for (let dx = -r; dx <= r; dx++) {
+            if (holeMask[checkRow + (sx + dx)] === 1) {
+              isPureKnown = false;
+              break;
+            }
+          }
+          if (!isPureKnown) break;
+        }
+
+        if (!isPureKnown) continue;
+
+        // Compute Sum of Squared Differences (SSD) over known pixels of target patch
+        let ssd = 0;
+        let validWeight = 0;
+        let earlyExit = false;
+
+        for (let dy = -r; dy <= r; dy++) {
+          const tRow = (targetY + dy) * width;
+          const srcRow = (sy + dy) * width;
+
+          for (let dx = -r; dx <= r; dx++) {
+            const tx = targetX + dx;
+            if (tx < 0 || tx >= width) continue;
+
+            const tIdx = tRow + tx;
+            if (holeMask[tIdx] === 0) {
+              const sxCandidate = sx + dx;
+              const sIdx = srcRow + sxCandidate;
+
+              const tByte = tIdx * 4;
+              const sByte = sIdx * 4;
+
+              const dr = data[tByte] - data[sByte];
+              const dg = data[tByte + 1] - data[sByte + 1];
+              const db = data[tByte + 2] - data[sByte + 2];
+
+              const distWeight = 1.0 / (1.0 + 0.15 * (dx * dx + dy * dy));
+              ssd += (dr * dr + dg * dg + db * db) * distWeight;
+              validWeight += distWeight;
+
+              if (validWeight > 0 && ssd / validWeight > bestScore) {
+                earlyExit = true;
+                break;
+              }
+            }
+          }
+          if (earlyExit) break;
+        }
+
+        if (!earlyExit && validWeight > 0) {
+          const normScore = ssd / validWeight;
+          const spatialDist = Math.hypot(sx - targetX, sy - targetY);
+          const score = normScore * (1.0 + 0.05 * (spatialDist / searchRadius));
+
+          if (score < bestScore) {
+            bestScore = score;
+            bestSrcX = sx;
+            bestSrcY = sy;
+          }
+        }
+      }
+    }
+
+    // 4. Fallback if no 100% pure patch found in search radius
+    if (bestSrcX < 0 || bestSrcY < 0) {
+      let minDist = Infinity;
+      for (let sy = Math.max(0, targetY - searchRadius); sy <= Math.min(height - 1, targetY + searchRadius); sy++) {
+        const sRow = sy * width;
+        for (let sx = Math.max(0, targetX - searchRadius); sx <= Math.min(width - 1, targetX + searchRadius); sx++) {
+          if (holeMask[sRow + sx] === 0) {
+            const d = (sx - targetX) ** 2 + (sy - targetY) ** 2;
+            if (d < minDist) {
+              minDist = d;
+              bestSrcX = sx;
+              bestSrcY = sy;
+            }
+          }
+        }
+      }
+    }
+
+    // 5. Copy EXACT sharp pixels from best source patch into unknown target pixels
+    if (bestSrcX >= 0 && bestSrcY >= 0) {
+      for (let dy = -r; dy <= r; dy++) {
+        const ty = targetY + dy;
+        if (ty < 0 || ty >= height) continue;
+        const sy = Math.min(height - 1, Math.max(0, bestSrcY + dy));
+
+        const tRow = ty * width;
+        const sRow = sy * width;
+
+        for (let dx = -r; dx <= r; dx++) {
+          const tx = targetX + dx;
+          if (tx < 0 || tx >= width) continue;
+          const sx = Math.min(width - 1, Math.max(0, bestSrcX + dx));
+
+          const tIdx = tRow + tx;
+          if (holeMask[tIdx] === 1) {
+            const tByte = tIdx * 4;
+            const sByte = (sRow + sx) * 4;
+
+            data[tByte] = data[sByte];
+            data[tByte + 1] = data[sByte + 1];
+            data[tByte + 2] = data[sByte + 2];
+            data[tByte + 3] = 255;
+
+            lum[tIdx] = 0.299 * data[tByte] + 0.587 * data[tByte + 1] + 0.114 * data[tByte + 2];
+
+            holeMask[tIdx] = 0;
+            confidence[tIdx] = bestTargetConf;
+            remainingHoles--;
+          }
+        }
+      }
+    } else {
+      const idx = targetY * width + targetX;
+      holeMask[idx] = 0;
+      confidence[idx] = 0.5;
+      remainingHoles--;
+    }
+  }
+
+  // 6. Micro-feather (1px subtle blend) ONLY at the outermost edge of the original hole
+  // Perfectly marries the copied sharp texture with the surrounding image with ZERO blurry smudge
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = row + x;
+      if (origHoleMask[idx] === 1) {
+        const touchesKnown =
+          origHoleMask[idx - 1] === 0 ||
+          origHoleMask[idx + 1] === 0 ||
+          origHoleMask[idx - width] === 0 ||
+          origHoleMask[idx + width] === 0;
+
+        if (touchesKnown) {
+          let sumR = 0, sumG = 0, sumB = 0, count = 0;
+          const neighbors = [idx - 1, idx + 1, idx - width, idx + width];
+          for (const n of neighbors) {
+            if (origHoleMask[n] === 0) {
+              const b = n * 4;
+              sumR += data[b];
+              sumG += data[b + 1];
+              sumB += data[b + 2];
+              count++;
+            }
+          }
+          if (count > 0) {
+            const b = idx * 4;
+            data[b] = Math.round(data[b] * 0.8 + (sumR / count) * 0.2);
+            data[b + 1] = Math.round(data[b + 1] * 0.8 + (sumG / count) * 0.2);
+            data[b + 2] = Math.round(data[b + 2] * 0.8 + (sumB / count) * 0.2);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Fast, high-quality Exemplar & Patch-Match Texture Synthesis Inpainting Fallback
  */
 export function inpaintPatchExemplar(
   patchCanvas: HTMLCanvasElement,
@@ -309,126 +653,9 @@ export function inpaintPatchExemplar(
   const h = patchCanvas.height;
   const ctx = patchCanvas.getContext('2d', { willReadFrequently: true })!;
   const imgData = ctx.getImageData(0, 0, w, h);
-  const data = imgData.data;
 
-  // Clone mask for iteration
-  const holeMask = new Uint8Array(mask);
-  let holeCount = 0;
-  for (let i = 0; i < holeMask.length; i++) {
-    if (holeMask[i] > 0) holeCount++;
-  }
-
-  if (holeCount === 0) return patchCanvas;
-
-  // Multi-pass onion-peel inward diffusion with directional texture synthesis
-  const kernelRadius = Math.max(3, Math.round(w * 0.04));
-  let remaining = holeCount;
-  let iterations = 0;
-  const maxIterations = 300;
-
-  while (remaining > 0 && iterations < maxIterations) {
-    iterations++;
-    const boundary: number[] = [];
-
-    // Find current boundary pixels
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const idx = row + x;
-        if (holeMask[idx] > 0) {
-          const isEdge =
-            (x > 0 && holeMask[idx - 1] === 0) ||
-            (x < w - 1 && holeMask[idx + 1] === 0) ||
-            (y > 0 && holeMask[idx - w] === 0) ||
-            (y < h - 1 && holeMask[idx + w] === 0);
-          if (isEdge) boundary.push(x, y);
-        }
-      }
-    }
-
-    if (boundary.length === 0) break;
-
-    const toFill: { x: number; y: number; r: number; g: number; b: number }[] = [];
-
-    for (let i = 0; i < boundary.length; i += 2) {
-      const bx = boundary[i];
-      const by = boundary[i + 1];
-
-      let sumR = 0, sumG = 0, sumB = 0, sumW = 0;
-
-      const minX = Math.max(0, bx - kernelRadius);
-      const maxX = Math.min(w - 1, bx + kernelRadius);
-      const minY = Math.max(0, by - kernelRadius);
-      const maxY = Math.min(h - 1, by + kernelRadius);
-
-      for (let sy = minY; sy <= maxY; sy++) {
-        const sRow = sy * w;
-        for (let sx = minX; sx <= maxX; sx++) {
-          if (holeMask[sRow + sx] === 0) {
-            const dx = sx - bx;
-            const dy = sy - by;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            const weight = 1.0 / (dist * dist + 0.05);
-
-            const pIdx = (sRow + sx) * 4;
-            sumR += data[pIdx] * weight;
-            sumG += data[pIdx + 1] * weight;
-            sumB += data[pIdx + 2] * weight;
-            sumW += weight;
-          }
-        }
-      }
-
-      if (sumW > 0) {
-        toFill.push({
-          x: bx,
-          y: by,
-          r: Math.round(sumR / sumW),
-          g: Math.round(sumG / sumW),
-          b: Math.round(sumB / sumW),
-        });
-      }
-    }
-
-    for (const f of toFill) {
-      const idx = (f.y * w + f.x) * 4;
-      data[idx] = f.r;
-      data[idx + 1] = f.g;
-      data[idx + 2] = f.b;
-      holeMask[f.y * w + f.x] = 0;
-      remaining--;
-    }
-  }
-
-  // Micro-texture noise pass to match natural image grain
-  let variance = 0;
-  let samples = 0;
-  for (let y = 1; y < h - 1; y += 3) {
-    const row = y * w;
-    for (let x = 1; x < w - 1; x += 3) {
-      if (mask[row + x] === 0) {
-        const cIdx = (row + x) * 4;
-        const rIdx = (row + x + 1) * 4;
-        variance += Math.abs(data[cIdx] - data[rIdx]);
-        samples++;
-      }
-    }
-  }
-  const avgVariance = samples > 0 ? variance / samples : 1;
-  const noiseAmp = Math.min(2.5, Math.max(0.4, avgVariance * 0.3));
-
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      if (mask[row + x] > 0) {
-        const pIdx = (row + x) * 4;
-        const noise = (Math.random() - 0.5) * noiseAmp * 2;
-        data[pIdx] = Math.max(0, Math.min(255, data[pIdx] + noise));
-        data[pIdx + 1] = Math.max(0, Math.min(255, data[pIdx + 1] + noise));
-        data[pIdx + 2] = Math.max(0, Math.min(255, data[pIdx + 2] + noise));
-      }
-    }
-  }
+  // Run sharp Criminisi exemplar texture synthesis
+  criminisiInpaint(imgData, mask, w, h, 3, 50);
 
   const outCanvas = document.createElement('canvas');
   outCanvas.width = w;
@@ -482,8 +709,8 @@ export async function removeGeminiWatermarkAuto(
   patchBeforeCanvas.height = patchSize;
   patchBeforeCanvas.getContext('2d')!.drawImage(patchCanvas, 0, 0);
 
-  // 3. Generate binary mask for the patch
-  const mask = generatePatchMask(patchSize, coverage);
+  // 3. Generate tight binary mask for the watermark icon
+  const mask = generatePatchMask(patchSize, coverage, origWidth, origHeight);
 
   let inpaintedPatchCanvas: HTMLCanvasElement | null = null;
   let engineUsed: 'lama-onnx' | 'texture-synthesis' = 'texture-synthesis';
@@ -594,42 +821,7 @@ export async function removeGeminiWatermarkAuto(
   patchAfterCanvas.height = patchSize;
   patchAfterCanvas.getContext('2d')!.drawImage(inpaintedPatchCanvas, 0, 0);
 
-  // 6. Seamless Re-compositing with 12px Feathered Alpha Mask
-  // Create alpha feather mask for top (y) and left (x) seams
-  const featherSize = 12;
-  const featheredPatch = document.createElement('canvas');
-  featheredPatch.width = patchSize;
-  featheredPatch.height = patchSize;
-  const fCtx = featheredPatch.getContext('2d')!;
-  fCtx.drawImage(inpaintedPatchCanvas, 0, 0);
-
-  const fImgData = fCtx.getImageData(0, 0, patchSize, patchSize);
-  const fPixels = fImgData.data;
-
-  for (let py = 0; py < patchSize; py++) {
-    const row = py * patchSize;
-    for (let px = 0; px < patchSize; px++) {
-      // Calculate normalized distances from the interior seams
-      let alphaTop = 1.0;
-      let alphaLeft = 1.0;
-
-      if (py < featherSize) {
-        const t = py / featherSize;
-        alphaTop = t * t * (3 - 2 * t); // Smoothstep
-      }
-      if (px < featherSize) {
-        const t = px / featherSize;
-        alphaLeft = t * t * (3 - 2 * t); // Smoothstep
-      }
-
-      const alpha = Math.min(alphaTop, alphaLeft);
-      const idx = (row + px) * 4;
-      fPixels[idx + 3] = Math.round(fPixels[idx + 3] * alpha);
-    }
-  }
-  fCtx.putImageData(fImgData, 0, 0);
-
-  // 7. Composite back onto the original full-resolution canvas
+  // 6. Composite back onto original full-resolution canvas
   const fullCanvas = document.createElement('canvas');
   fullCanvas.width = origWidth;
   fullCanvas.height = origHeight;
@@ -638,8 +830,45 @@ export async function removeGeminiWatermarkAuto(
   // Draw full original image
   fullCtx.drawImage(sourceImage, 0, 0, origWidth, origHeight);
 
-  // Composite the feathered patch exactly over the bottom-right corner
-  fullCtx.drawImage(featheredPatch, patchX, patchY);
+  if (engineUsed === 'texture-synthesis') {
+    // Exemplar texture synthesis operates directly and touches ONLY the watermark hole.
+    // All other pixels in the patch are 100% bit-identical to the source image.
+    fullCtx.drawImage(inpaintedPatchCanvas, patchX, patchY);
+  } else {
+    // Seamless re-compositing with 12px feathered alpha mask for neural models
+    const featherSize = 12;
+    const featheredPatch = document.createElement('canvas');
+    featheredPatch.width = patchSize;
+    featheredPatch.height = patchSize;
+    const fCtx = featheredPatch.getContext('2d')!;
+    fCtx.drawImage(inpaintedPatchCanvas, 0, 0);
+
+    const fImgData = fCtx.getImageData(0, 0, patchSize, patchSize);
+    const fPixels = fImgData.data;
+
+    for (let py = 0; py < patchSize; py++) {
+      const row = py * patchSize;
+      for (let px = 0; px < patchSize; px++) {
+        let alphaTop = 1.0;
+        let alphaLeft = 1.0;
+
+        if (py < featherSize) {
+          const t = py / featherSize;
+          alphaTop = t * t * (3 - 2 * t);
+        }
+        if (px < featherSize) {
+          const t = px / featherSize;
+          alphaLeft = t * t * (3 - 2 * t);
+        }
+
+        const alpha = Math.min(alphaTop, alphaLeft);
+        const idx = (row + px) * 4;
+        fPixels[idx + 3] = Math.round(fPixels[idx + 3] * alpha);
+      }
+    }
+    fCtx.putImageData(fImgData, 0, 0);
+    fullCtx.drawImage(featheredPatch, patchX, patchY);
+  }
 
   const executionTimeMs = Math.round(performance.now() - startTime);
 
