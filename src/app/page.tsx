@@ -50,7 +50,7 @@ export default function HomePage() {
             Time<span className="text-accent">mark</span> Studio
           </span>
           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 hidden sm:inline-block">
-            v1.3.0
+            v1.3.1
           </span>
         </div>
 
@@ -84,7 +84,7 @@ export default function HomePage() {
         {/* Right: Version Pill on mobile + Client-side status indicator */}
         <div className="flex items-center gap-2">
           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 sm:hidden">
-            v1.3.0
+            v1.3.1
           </span>
           <span className="w-2 h-2 rounded-full bg-emerald-500/80" title="100% Client-Side" />
         </div>

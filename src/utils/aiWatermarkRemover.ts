@@ -68,36 +68,31 @@ export function reverseAlphaRestore(
   const data = imgData.data;
 
   // 1. Locate Exact Watermark Anchor
-  let marginScale = 0.032;
   let sizeScale = 0.055;
-
-  if (coverage === 'compact') {
-    marginScale = 0.026;
-    sizeScale = 0.045;
-  } else if (coverage === 'large') {
-    marginScale = 0.036;
-    sizeScale = 0.068;
-  } else if (coverage === 'wide') {
-    marginScale = 0.032;
-    sizeScale = 0.085;
-  }
+  if (coverage === 'compact') sizeScale = 0.045;
+  else if (coverage === 'large') sizeScale = 0.070;
+  else if (coverage === 'wide') sizeScale = 0.088;
 
   const minDim = Math.min(width, height);
-  const margin = Math.round(Math.max(20, minDim * marginScale));
-  const size = Math.round(Math.max(40, minDim * sizeScale));
+  // Increase boxSize by +25% toward the top-left
+  const rawSize = Math.round(Math.max(52, minDim * sizeScale * 1.25));
 
-  let boxX = Math.max(0, width - margin - size);
-  let boxY = Math.max(0, height - margin - size);
+  // Extend box all the way to width - 4 and height - 4
+  const boxEndX = Math.min(width, width - 4);
+  const boxEndY = Math.min(height, height - 4);
+
+  let boxX = Math.max(0, boxEndX - rawSize);
+  let boxY = Math.max(0, boxEndY - rawSize);
 
   // Scan local corner region to locate exact brightness peak of the star center
-  const searchMinX = Math.max(0, width - Math.round(margin * 1.8 + size));
-  const searchMaxX = width - Math.max(8, Math.round(width * 0.01));
-  const searchMinY = Math.max(0, height - Math.round(margin * 1.8 + size));
-  const searchMaxY = height - Math.max(8, Math.round(height * 0.01));
+  const searchMinX = Math.max(0, width - Math.round(rawSize * 1.35));
+  const searchMaxX = width - Math.max(4, Math.round(width * 0.005));
+  const searchMinY = Math.max(0, height - Math.round(rawSize * 1.35));
+  const searchMaxY = height - Math.max(4, Math.round(height * 0.005));
 
   let peakLuma = -1;
-  let peakX = boxX + Math.round(size / 2);
-  let peakY = boxY + Math.round(size / 2);
+  let peakX = boxX + Math.round(rawSize / 2);
+  let peakY = boxY + Math.round(rawSize / 2);
 
   for (let y = searchMinY; y < searchMaxY; y++) {
     const row = y * width;
@@ -112,10 +107,17 @@ export function reverseAlphaRestore(
     }
   }
 
+  // Ensure box covers the star center while extending to width - 4, height - 4
   if (peakLuma > 175) {
-    boxX = Math.max(0, Math.min(width - size, peakX - Math.round(size / 2)));
-    boxY = Math.max(0, Math.min(height - size, peakY - Math.round(size / 2)));
+    const desiredMinX = Math.max(0, peakX - Math.round(rawSize * 0.55));
+    const desiredMinY = Math.max(0, peakY - Math.round(rawSize * 0.55));
+    boxX = Math.min(boxX, desiredMinX);
+    boxY = Math.min(boxY, desiredMinY);
   }
+
+  const size = Math.min(boxEndX - boxX, boxEndY - boxY);
+  boxX = boxEndX - size;
+  boxY = boxEndY - size;
 
   // 2. Compute local background luminance (bgLuma) from the clean 8px border framing that square
   const borderWidth = 8;
@@ -155,7 +157,7 @@ export function reverseAlphaRestore(
 
   const borderAvgLuma = bgLumaCount > 0 ? bgLumaSum / bgLumaCount : 128;
 
-  // 3. Measure brightness excess & estimate alpha transparency
+  // 3. Measure brightness excess & estimate alpha transparency (threshold delta > 3)
   const alphaMap = new Float32Array(size * size);
 
   for (let py = 0; py < size; py++) {
@@ -170,11 +172,12 @@ export function reverseAlphaRestore(
       const effectiveBg =
         localBg > 0 && Math.abs(localBg - borderAvgLuma) < 55 ? localBg : borderAvgLuma;
       const delta = pixelLuma - effectiveBg;
-      const deltaDenom = Math.max(20, 255 - effectiveBg);
+      const deltaDenom = Math.max(15, 255 - effectiveBg);
 
-      if (delta > 6) {
-        const ramp = Math.min(1.0, (delta - 6) / 8.0);
-        const rawAlpha = ((delta - 4) / deltaDenom) * 1.15 * ramp;
+      if (delta > 3) {
+        // Smooth linear ramp starting right at delta > 3
+        const ramp = Math.min(1.0, (delta - 3) / 5.0);
+        const rawAlpha = ((delta - 2) / deltaDenom) * 1.15 * ramp;
         alphaMap[py * size + px] = Math.max(0, Math.min(0.85, rawAlpha));
       } else {
         alphaMap[py * size + px] = 0;
@@ -182,7 +185,29 @@ export function reverseAlphaRestore(
     }
   }
 
-  // 1px spatial smoothing on alpha map to match anti-aliasing
+  // 1.5px morphological dilation on estimated alpha map
+  const dilatedAlpha = new Float32Array(size * size);
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let maxA = alphaMap[py * size + px];
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = py + dy;
+        if (ny < 0 || ny >= size) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = px + dx;
+          if (nx < 0 || nx >= size) continue;
+          if (dx * dx + dy * dy <= 2.25) {
+            // within 1.5px
+            const val = alphaMap[ny * size + nx];
+            if (val > maxA) maxA = val;
+          }
+        }
+      }
+      dilatedAlpha[py * size + px] = maxA;
+    }
+  }
+
+  // Soft Gaussian feather on the dilated alpha to eliminate any hairline border
   const smoothAlpha = new Float32Array(size * size);
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
@@ -194,8 +219,8 @@ export function reverseAlphaRestore(
         for (let dx = -1; dx <= 1; dx++) {
           const nx = px + dx;
           if (nx < 0 || nx >= size) continue;
-          const w = dx === 0 && dy === 0 ? 4 : 1;
-          sum += alphaMap[ny * size + nx] * w;
+          const w = dx === 0 && dy === 0 ? 4 : dx === 0 || dy === 0 ? 2 : 1;
+          sum += dilatedAlpha[ny * size + nx] * w;
           count += w;
         }
       }
@@ -213,7 +238,7 @@ export function reverseAlphaRestore(
     for (let px = 0; px < size; px++) {
       const x = boxX + px;
       const alpha = smoothAlpha[py * size + px];
-      if (alpha <= 0.015) continue;
+      if (alpha <= 0.008) continue;
 
       const idx = (row + x) * 4;
       const r = data[idx];
