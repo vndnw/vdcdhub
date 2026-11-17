@@ -13,6 +13,7 @@ import { renderVideoWatermark } from '@/utils/videoWatermarkRenderer';
 import { loadFonts } from '@/utils/fontLoader';
 import {
   Download,
+  Share2,
   RotateCcw,
   Image as ImageIcon,
   Film,
@@ -28,7 +29,18 @@ export default function Editor() {
   const [fileName, setFileName] = useState<string>('');
   const [settings, setSettings] = useState<WatermarkSettings>(createDefaultSettings());
   const [isExporting, setIsExporting] = useState(false);
+  const [exportAction, setExportAction] = useState<'download' | 'share' | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [mediaInfo, setMediaInfo] = useState<{ width: number; height: number; size: string } | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastMessage(msg);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+    }, 3500);
+  }, []);
 
   // Optical zoom & pan state
   const [zoom, setZoom] = useState<number>(1.0);
@@ -158,13 +170,16 @@ export default function Editor() {
     setVideoExportProgress(null);
   }, []);
 
-  // ---- Export / Download handler (Image or Video) ----
-  const handleDownload = useCallback(async () => {
+  // ---- Export handler: Download (Direct) vs Share (Native Share) ----
+  const handleExport = useCallback(async (action: 'download' | 'share') => {
     if (!image && !video) return;
+    if (isExporting) return;
+
+    setIsExporting(true);
+    setExportAction(action);
 
     // 1. VIDEO EXPORT
     if (video && videoFile) {
-      setIsExporting(true);
       const abortCtrl = new AbortController();
       abortControllerRef.current = abortCtrl;
       setVideoExportProgress({ progress: 0, status: 'Đang chuẩn bị kết xuất video...' });
@@ -186,32 +201,38 @@ export default function Editor() {
           signal: abortCtrl.signal,
         });
 
-        // Mobile native share check
-        const file = new File([result.blob], result.filename, { type: result.blob.type });
-        if (
-          typeof navigator !== 'undefined' &&
-          navigator.canShare &&
-          navigator.canShare({ files: [file] }) &&
-          /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
-        ) {
-          try {
-            await navigator.share({
-              files: [file],
-              title: result.filename,
-            });
-            setIsExporting(false);
-            setVideoExportProgress(null);
-            return;
-          } catch (shareErr: any) {
-            if (shareErr.name === 'AbortError') {
-              setIsExporting(false);
-              setVideoExportProgress(null);
-              return;
+        if (action === 'download') {
+          // Direct file download directly to Downloads folder
+          downloadBlob(result.blob, result.filename);
+          showToast('Đang tải video về thư mục Downloads...');
+        } else {
+          // Share via Web Share API
+          const mimeType = result.blob.type || 'video/mp4';
+          const file = new File([result.blob], result.filename, { type: mimeType });
+
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.canShare &&
+            navigator.canShare({ files: [file] })
+          ) {
+            try {
+              await navigator.share({
+                files: [file],
+                title: result.filename,
+              });
+            } catch (shareErr: any) {
+              if (shareErr.name !== 'AbortError') {
+                console.error('Share failed, fallback to download:', shareErr);
+                downloadBlob(result.blob, result.filename);
+                showToast('Không thể mở menu chia sẻ, đã tải video về máy.');
+              }
             }
+          } else {
+            // Graceful fallback for unsupported desktop browsers
+            downloadBlob(result.blob, result.filename);
+            showToast('Trình duyệt chưa hỗ trợ chia sẻ trực tiếp, đã tải video về máy.');
           }
         }
-
-        downloadBlob(result.blob, result.filename);
       } catch (err: any) {
         if (abortCtrl.signal.aborted) {
           console.log('Video export aborted by user');
@@ -221,6 +242,7 @@ export default function Editor() {
         }
       } finally {
         setIsExporting(false);
+        setExportAction(null);
         setVideoExportProgress(null);
         abortControllerRef.current = null;
       }
@@ -229,8 +251,6 @@ export default function Editor() {
 
     // 2. IMAGE EXPORT
     if (image) {
-      setIsExporting(true);
-
       try {
         const origW = image.naturalWidth;
         const origH = image.naturalHeight;
@@ -242,39 +262,46 @@ export default function Editor() {
         const blob = await exportCanvasAsBlob(canvas, 0.95);
         const outputFilename = formatTimemarkFilename(settings.dateTime, 'photo');
 
-        // Check mobile Web Share API for native Camera Roll saving
-        const file = new File([blob], outputFilename, { type: 'image/jpeg' });
-        if (
-          typeof navigator !== 'undefined' &&
-          navigator.canShare &&
-          navigator.canShare({ files: [file] }) &&
-          /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
-        ) {
-          try {
-            await navigator.share({
-              files: [file],
-              title: outputFilename,
-            });
-            setIsExporting(false);
-            return;
-          } catch (shareErr: any) {
-            if (shareErr.name === 'AbortError') {
-              setIsExporting(false);
-              return;
+        if (action === 'download') {
+          // Direct file download directly to Downloads folder
+          downloadBlob(blob, outputFilename);
+          showToast('Đang tải ảnh về thư mục Downloads...');
+        } else {
+          // Share via Web Share API
+          const file = new File([blob], outputFilename, { type: 'image/jpeg' });
+
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.canShare &&
+            navigator.canShare({ files: [file] })
+          ) {
+            try {
+              await navigator.share({
+                files: [file],
+                title: outputFilename,
+              });
+            } catch (shareErr: any) {
+              if (shareErr.name !== 'AbortError') {
+                console.error('Share failed, fallback to download:', shareErr);
+                downloadBlob(blob, outputFilename);
+                showToast('Không thể mở menu chia sẻ, đã tải ảnh về máy.');
+              }
             }
+          } else {
+            // Graceful fallback for unsupported desktop browsers
+            downloadBlob(blob, outputFilename);
+            showToast('Trình duyệt chưa hỗ trợ chia sẻ trực tiếp, đã tải ảnh về máy.');
           }
         }
-
-        // Standard direct download
-        downloadBlob(blob, outputFilename);
       } catch (err) {
         console.error('Export failed:', err);
         alert('Không thể lưu ảnh. Vui lòng thử lại.');
       } finally {
         setIsExporting(false);
+        setExportAction(null);
       }
     }
-  }, [image, video, videoFile, settings, fileName, zoom, pan, stageDisplaySize]);
+  }, [image, video, videoFile, settings, fileName, zoom, pan, stageDisplaySize, isExporting, showToast]);
 
   // ---- Reset ----
   const handleReset = useCallback(() => {
@@ -336,14 +363,30 @@ export default function Editor() {
               Chọn tệp khác
             </button>
             <button
-              onClick={handleDownload}
+              onClick={() => handleExport('share')}
               disabled={isExporting}
-              className="btn-download !py-1.5 !px-4 !text-xs !rounded-xl !min-h-[36px] flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-neutral-200 hover:text-white bg-editor-surface border border-editor-border hover:border-neutral-500 transition-colors flex items-center gap-1.5 min-h-[36px]"
             >
-              {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-              {isExporting
+              {isExporting && exportAction === 'share' ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <Share2 size={13} />
+              )}
+              Chia sẻ
+            </button>
+            <button
+              onClick={() => handleExport('download')}
+              disabled={isExporting}
+              className="btn-download !w-auto !py-1.5 !px-4 !text-xs !rounded-xl !min-h-[36px] flex items-center gap-1.5"
+            >
+              {isExporting && exportAction === 'download' ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )}
+              {isExporting && exportAction === 'download'
                 ? video
-                  ? 'Đang xuất video...'
+                  ? 'Đang xuất...'
                   : 'Đang lưu...'
                 : video
                 ? 'Tải video về (MP4)'
@@ -390,24 +433,46 @@ export default function Editor() {
       {/* ============================================================ */}
       {/* 3. STICKY BOTTOM ACTION BAR (Mobile Only)                    */}
       {/* ============================================================ */}
-      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-editor-bg/95 backdrop-blur-lg border-t border-editor-border px-4 py-2.5 pb-[max(10px,env(safe-area-inset-bottom))] shadow-2xl">
-        <button
-          type="button"
-          onClick={handleDownload}
-          disabled={isExporting}
-          className="btn-download"
-        >
-          {isExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-          <span>
-            {isExporting
-              ? video
-                ? 'Đang xuất video...'
-                : 'Đang xuất ảnh...'
-              : video
-              ? 'Tải video về (MP4)'
-              : 'Tải ảnh về (Download)'}
-          </span>
-        </button>
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-editor-bg/95 backdrop-blur-lg border-t border-editor-border px-3.5 py-2.5 pb-[max(10px,env(safe-area-inset-bottom))] shadow-2xl">
+        <div className="flex items-center gap-2.5 w-full">
+          {/* 1. Primary: Tải về (~68% width) */}
+          <button
+            type="button"
+            onClick={() => handleExport('download')}
+            disabled={isExporting}
+            className="btn-download flex-[7] !w-auto !px-3 font-bold"
+          >
+            {isExporting && exportAction === 'download' ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : (
+              <Download size={18} />
+            )}
+            <span className="truncate">
+              {isExporting && exportAction === 'download'
+                ? video
+                  ? 'Đang xuất video...'
+                  : 'Đang xuất ảnh...'
+                : video
+                ? 'Tải video (MP4)'
+                : 'Tải ảnh về'}
+            </span>
+          </button>
+
+          {/* 2. Secondary: Chia sẻ (~32% width) */}
+          <button
+            type="button"
+            onClick={() => handleExport('share')}
+            disabled={isExporting}
+            className="flex-[3] py-3.5 px-3 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 min-h-[48px] bg-editor-surface border border-editor-border text-white hover:bg-neutral-800 active:scale-98 transition-all shadow-lg"
+          >
+            {isExporting && exportAction === 'share' ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : (
+              <Share2 size={18} />
+            )}
+            <span className="truncate">Chia sẻ</span>
+          </button>
+        </div>
       </div>
 
       {/* ============================================================ */}
@@ -448,6 +513,15 @@ export default function Editor() {
               Hủy xuất video
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* 5. TOAST NOTIFICATION                                        */}
+      {/* ============================================================ */}
+      {toastMessage && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-neutral-900/95 text-white text-xs font-medium border border-white/20 backdrop-blur-md shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+          <span>{toastMessage}</span>
         </div>
       )}
     </div>
