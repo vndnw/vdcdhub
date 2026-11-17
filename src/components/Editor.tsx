@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { WatermarkSettings } from '@/types';
-import { createDefaultSettings } from '@/types';
+import { createDefaultSettings, formatTimemarkFilename } from '@/types';
 import ImageUploader from './ImageUploader';
 import CanvasPreview from './CanvasPreview';
 import ControlPanel from './ControlPanel';
@@ -218,7 +218,7 @@ export default function Editor() {
       try {
         const { canvas } = await renderWatermark(image, settings);
         const blob = await exportCanvasAsBlob(canvas, 0.95);
-        const outputFilename = `${fileName || 'photo'}_timemark.jpg`;
+        const outputFilename = formatTimemarkFilename(settings.dateTime, 'photo');
 
         // Check mobile Web Share API for native Camera Roll saving
         const file = new File([blob], outputFilename, { type: 'image/jpeg' });

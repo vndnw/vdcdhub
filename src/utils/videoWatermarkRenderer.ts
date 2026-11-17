@@ -6,6 +6,7 @@
 // ============================================================
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import type { WatermarkSettings } from '@/types';
+import { formatTimemarkFilename } from '@/types';
 import { drawWatermarkOnly } from './watermarkRenderer';
 import { loadFonts } from './fontLoader';
 
@@ -29,8 +30,7 @@ export async function renderVideoWatermark(
   options: VideoRenderOptions
 ): Promise<VideoRenderResult> {
   const { videoFile, settings, onProgress, signal } = options;
-  const baseName = videoFile.name.replace(/\.[^.]+$/, '');
-  const outputFilename = `${baseName || 'video'}_timemark.mp4`;
+  const outputFilename = formatTimemarkFilename(settings.dateTime, 'video');
 
   await loadFonts();
 
@@ -55,7 +55,7 @@ export async function renderVideoWatermark(
   const { blob, ext } = await renderWithMediaRecorder(videoFile, settings, onProgress, signal);
   return {
     blob,
-    filename: `${baseName || 'video'}_timemark.${ext}`,
+    filename: ext === 'mp4' ? outputFilename : outputFilename.replace(/\.mp4$/, `.${ext}`),
   };
 }
 
