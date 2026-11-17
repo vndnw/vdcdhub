@@ -32,7 +32,7 @@ export default function HomePage() {
             VDCD <span className="text-accent">Húp</span>
           </span>
           <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-accent/20 text-accent border border-accent/30">
-            v3.0.2
+            v3.0.3
           </span>
         </div>
       </header>

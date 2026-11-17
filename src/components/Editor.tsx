@@ -338,7 +338,7 @@ export default function Editor() {
         </button>
 
         {/* Live Canvas / Video Preview */}
-        <div className="flex-1 p-2 sm:p-3 overflow-hidden flex items-center justify-center">
+        <div className="flex-1 overflow-hidden flex flex-col">
           <CanvasPreview
             image={image}
             video={video}
