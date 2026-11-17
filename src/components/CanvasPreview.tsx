@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import type { WatermarkSettings } from '@/types';
 import { renderWatermarkToCanvas } from '@/utils/watermarkRenderer';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
@@ -28,11 +28,50 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
     setPan({ x: 0, y: 0 });
   }, [image]);
 
+  // Calculate base rendered dimensions fitting the container at 1x
+  const imgAspect = image.naturalWidth / image.naturalHeight;
+  const containerAspect =
+    containerSize.width > 0 && containerSize.height > 0
+      ? containerSize.width / containerSize.height
+      : 1;
+
+  let baseWidth = containerSize.width || 300;
+  let baseHeight = containerSize.height || 300;
+
+  if (containerSize.width > 0 && containerSize.height > 0) {
+    if (imgAspect > containerAspect) {
+      baseWidth = containerSize.width;
+      baseHeight = containerSize.width / imgAspect;
+    } else {
+      baseHeight = containerSize.height;
+      baseWidth = containerSize.height * imgAspect;
+    }
+  }
+
+  // Calculate pan clamp bounds so user can inspect all 4 corners (stamps & logos)
+  const getPanBounds = useCallback(
+    (currentZoom: number) => {
+      const excessX = baseWidth * currentZoom - containerSize.width;
+      const excessY = baseHeight * currentZoom - containerSize.height;
+      // Allow reaching corners smoothly with a 20px / 24px comfort margin
+      const maxX = excessX > 0 ? excessX / 2 + 20 : 0;
+      const maxY = excessY > 0 ? excessY / 2 + 24 : 0;
+      return { maxX, maxY };
+    },
+    [baseWidth, baseHeight, containerSize]
+  );
+
   const handleZoomChange = (newZoom: number) => {
     const clamped = Math.max(1.0, Math.min(3.0, newZoom));
     setZoom(clamped);
     if (clamped <= 1.0) {
       setPan({ x: 0, y: 0 });
+    } else {
+      const { maxX, maxY } = getPanBounds(clamped);
+      setPan((prev) => ({
+        x: Math.max(-maxX, Math.min(maxX, prev.x)),
+        y: Math.max(-maxY, Math.min(maxY, prev.y)),
+      }));
     }
   };
 
@@ -55,15 +94,13 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
     if (!isDragging || zoom <= 1.0) return;
     e.preventDefault();
 
-    const maxPanX = Math.max(60, (containerSize.width * (zoom - 1)) / 2 + 80);
-    const maxPanY = Math.max(60, (containerSize.height * (zoom - 1)) / 2 + 80);
-
+    const { maxX, maxY } = getPanBounds(zoom);
     const proposedX = e.clientX - dragStartRef.current.x;
     const proposedY = e.clientY - dragStartRef.current.y;
 
     setPan({
-      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
-      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
+      x: Math.max(-maxX, Math.min(maxX, proposedX)),
+      y: Math.max(-maxY, Math.min(maxY, proposedY)),
     });
   };
 
@@ -85,21 +122,38 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
     if (!isDragging || zoom <= 1.0 || e.touches.length !== 1) return;
     if (e.cancelable) e.preventDefault();
 
-    const maxPanX = Math.max(60, (containerSize.width * (zoom - 1)) / 2 + 80);
-    const maxPanY = Math.max(60, (containerSize.height * (zoom - 1)) / 2 + 80);
-
+    const { maxX, maxY } = getPanBounds(zoom);
     const proposedX = e.touches[0].clientX - dragStartRef.current.x;
     const proposedY = e.touches[0].clientY - dragStartRef.current.y;
 
     setPan({
-      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
-      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
+      x: Math.max(-maxX, Math.min(maxX, proposedX)),
+      y: Math.max(-maxY, Math.min(maxY, proposedY)),
     });
   };
 
   const handleTouchEnd = () => {
     setIsDragging(false);
   };
+
+  // Window release listener to prevent drag sticking
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onRelease = () => {
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mouseup', onRelease);
+    window.addEventListener('touchend', onRelease);
+    window.addEventListener('touchcancel', onRelease);
+
+    return () => {
+      window.removeEventListener('mouseup', onRelease);
+      window.removeEventListener('touchend', onRelease);
+      window.removeEventListener('touchcancel', onRelease);
+    };
+  }, [isDragging]);
 
   // Observe container size
   useEffect(() => {
@@ -124,57 +178,32 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
 
     const renderId = ++renderRef.current;
 
-    // Calculate display dimensions that fit the container while preserving aspect ratio
-    const imgAspect = image.naturalWidth / image.naturalHeight;
-    const containerAspect = containerSize.width / containerSize.height;
-
-    let displayWidth: number, displayHeight: number;
-    if (imgAspect > containerAspect) {
-      displayWidth = containerSize.width;
-      displayHeight = containerSize.width / imgAspect;
-    } else {
-      displayHeight = containerSize.height;
-      displayWidth = containerSize.height * imgAspect;
-    }
-
     // Debounce renders
     const timeout = setTimeout(async () => {
       if (renderId !== renderRef.current) return;
 
       try {
-        await renderWatermarkToCanvas(canvas, image, settings, displayWidth, displayHeight);
+        await renderWatermarkToCanvas(canvas, image, settings, baseWidth, baseHeight);
       } catch (err) {
         console.error('Render failed:', err);
       }
     }, 16); // ~60fps target
 
     return () => clearTimeout(timeout);
-  }, [image, settings, containerSize, canvasRef]);
-
-  // Calculate CSS display size
-  const imgAspect = image.naturalWidth / image.naturalHeight;
-  const containerAspect =
-    containerSize.width && containerSize.height
-      ? containerSize.width / containerSize.height
-      : 1;
-
-  let cssWidth = '100%';
-  let cssHeight = '100%';
-  if (containerSize.width > 0 && containerSize.height > 0) {
-    if (imgAspect > containerAspect) {
-      cssWidth = '100%';
-      cssHeight = 'auto';
-    } else {
-      cssWidth = 'auto';
-      cssHeight = '100%';
-    }
-  }
+  }, [image, settings, containerSize, canvasRef, baseWidth, baseHeight]);
 
   return (
     <div
       ref={containerRef}
       className="relative w-full h-full min-h-[260px] flex items-center justify-center overflow-hidden select-none"
-      style={{ touchAction: zoom > 1.0 ? 'none' : 'auto' }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+        position: 'relative',
+        touchAction: zoom > 1.0 ? 'none' : 'auto',
+      }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
@@ -184,28 +213,23 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
       onTouchEnd={handleTouchEnd}
       onTouchCancel={handleTouchEnd}
     >
-      {/* Zoomed & Panned Canvas Viewport */}
-      <div
-        className="w-full h-full flex items-center justify-center"
+      {/* Canvas Viewport: Exact Fit at 1x, Smooth Scaled & Panned when Zoomed */}
+      <canvas
+        ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
         style={{
+          width: `${Math.round(baseWidth)}px`,
+          height: `${Math.round(baseHeight)}px`,
+          maxWidth: '100%',
+          maxHeight: '100%',
+          objectFit: 'contain',
           transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
           transformOrigin: 'center center',
+          willChange: 'transform',
           transition: isDragging ? 'none' : 'transform 0.12s cubic-bezier(0, 0, 0.2, 1)',
           cursor: zoom > 1.0 ? (isDragging ? 'grabbing' : 'grab') : 'default',
+          pointerEvents: 'none',
         }}
-      >
-        <canvas
-          ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
-          style={{
-            width: cssWidth,
-            height: cssHeight,
-            maxWidth: '100%',
-            maxHeight: '100%',
-            objectFit: 'contain',
-            pointerEvents: 'none',
-          }}
-        />
-      </div>
+      />
 
       {/* Floating Zoom Controls Bar */}
       <div
