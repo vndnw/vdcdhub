@@ -61,6 +61,46 @@ export async function renderVideoWatermark(
 }
 
 /**
+ * Dynamically choose a supported H.264 codec string for WebCodecs.
+ * Higher resolutions (e.g. 1080p, 60fps) require Main Profile Level 4.2 (avc1.4d002a)
+ * rather than low-level baseline (avc1.42001f).
+ */
+async function selectSupportedH264Codec(
+  width: number,
+  height: number,
+  fps: number,
+  bitrate: number
+): Promise<string> {
+  const candidates = [
+    'avc1.4d002a', // Main Profile Level 4.2 (supports 1080p @ 60fps)
+    'avc1.4d0028', // Main Profile Level 4.0 (supports 1080p @ 30fps)
+    'avc1.420028', // Baseline Profile Level 4.0
+    'avc1.64002a', // High Profile Level 4.2
+    'avc1.42001f', // Baseline Profile Level 3.1
+  ];
+
+  for (const codec of candidates) {
+    try {
+      const config = {
+        codec,
+        width,
+        height,
+        bitrate,
+        framerate: fps,
+      };
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) {
+        return codec;
+      }
+    } catch {
+      // Continue to next candidate
+    }
+  }
+
+  return 'avc1.4d002a'; // Safe standard default
+}
+
+/**
  * Primary Engine: WebCodecs VideoEncoder + AudioEncoder + mp4-muxer
  */
 async function renderWithWebCodecs(
@@ -79,6 +119,9 @@ async function renderWithWebCodecs(
   video.muted = true;
   video.playsInline = true;
 
+  let videoEncoder: VideoEncoder | null = null;
+  let audioEncoder: AudioEncoder | null = null;
+
   try {
     await new Promise<void>((resolve, reject) => {
       video.onloadedmetadata = () => resolve();
@@ -87,9 +130,9 @@ async function renderWithWebCodecs(
 
     const origW = video.videoWidth || 1280;
     const origH = video.videoHeight || 720;
-    // H.264 codecs require even dimensions
-    const encWidth = origW % 2 === 0 ? origW : origW - 1;
-    const encHeight = origH % 2 === 0 ? origH : origH - 1;
+    // H.264 codecs strictly require even dimensions
+    const encWidth = (origW & ~1) || 1280;
+    const encHeight = (origH & ~1) || 720;
     const duration = video.duration || 1;
     const fps = 30;
     const totalFrames = Math.max(1, Math.round(duration * fps));
@@ -107,7 +150,11 @@ async function renderWithWebCodecs(
         audioBuffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
         await audioCtx.close();
 
-        if (audioBuffer && typeof AudioEncoder !== 'undefined') {
+        if (
+          audioBuffer &&
+          typeof AudioEncoder !== 'undefined' &&
+          typeof AudioData !== 'undefined'
+        ) {
           audioConfig = {
             numberOfChannels: Math.min(2, audioBuffer.numberOfChannels),
             sampleRate: audioBuffer.sampleRate,
@@ -145,9 +192,9 @@ async function renderWithWebCodecs(
       fastStart: 'in-memory',
     });
 
-    // 3. Setup VideoEncoder
+    // 3. Setup VideoEncoder with auto-detected valid H.264 profile/level
     let encoderError: Error | null = null;
-    const videoEncoder = new VideoEncoder({
+    videoEncoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
       error: (e) => {
         encoderError = e;
@@ -158,9 +205,10 @@ async function renderWithWebCodecs(
     // Determine bitrate based on resolution
     const pixelCount = encWidth * encHeight;
     const targetBitrate = Math.min(12_000_000, Math.max(2_500_000, pixelCount * 4));
+    const selectedCodec = await selectSupportedH264Codec(encWidth, encHeight, fps, targetBitrate);
 
     videoEncoder.configure({
-      codec: 'avc1.42001f', // H.264 Baseline
+      codec: selectedCodec,
       width: encWidth,
       height: encHeight,
       bitrate: targetBitrate,
@@ -168,7 +216,6 @@ async function renderWithWebCodecs(
     });
 
     // 4. Setup AudioEncoder if audio is supported
-    let audioEncoder: AudioEncoder | null = null;
     if (hasAudioEncoder && audioBuffer) {
       audioEncoder = new AudioEncoder({
         output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
@@ -191,7 +238,7 @@ async function renderWithWebCodecs(
 
     onProgress?.(5, 'Bắt đầu xử lý từng khung hình video...');
 
-    // 6. Sequential frame rendering
+    // 6. Sequential frame rendering with backpressure & seek timeout control
     for (let i = 0; i < totalFrames; i++) {
       if (signal?.aborted) {
         throw new Error('Đã hủy xuất video');
@@ -200,16 +247,34 @@ async function renderWithWebCodecs(
         throw encoderError;
       }
 
-      const frameTime = i / fps;
-      video.currentTime = Math.min(Math.max(0, duration - 0.001), frameTime);
+      // Backpressure Control: if queue >= 5, pause loop until encoder drains
+      while (videoEncoder.encodeQueueSize >= 5) {
+        if (signal?.aborted) throw new Error('Đã hủy xuất video');
+        if (encoderError) throw encoderError;
+        await new Promise((r) => setTimeout(r, 15));
+      }
 
-      await new Promise<void>((resolve) => {
-        const onSeeked = () => {
-          video.removeEventListener('seeked', onSeeked);
-          resolve();
-        };
-        video.addEventListener('seeked', onSeeked);
-      });
+      const frameTime = i / fps;
+      // Clamp target seek timestamps strictly to prevent onseeked hang near video end
+      const clampedSeekTime = Math.min(frameTime, Math.max(0, duration - 0.03));
+
+      // Safe seek with 250ms fallback timeout
+      if (Math.abs(video.currentTime - clampedSeekTime) > 0.001) {
+        video.currentTime = clampedSeekTime;
+        await new Promise<void>((resolve) => {
+          let timer: any = null;
+          const onSeeked = () => {
+            if (timer) clearTimeout(timer);
+            video.removeEventListener('seeked', onSeeked);
+            resolve();
+          };
+          timer = setTimeout(() => {
+            video.removeEventListener('seeked', onSeeked);
+            resolve();
+          }, 250);
+          video.addEventListener('seeked', onSeeked, { once: true });
+        });
+      }
 
       // Draw original video frame with optical crop/zoom if specified
       if (crop && (crop.width !== origW || crop.height !== origH || crop.x !== 0 || crop.y !== 0)) {
@@ -225,25 +290,31 @@ async function renderWithWebCodecs(
       // Draw Timemark watermark
       drawWatermarkOnly(ctx, frameSettings, encWidth, encHeight);
 
-      // Encode VideoFrame
+      // Encode VideoFrame with immediate close() in try/finally to prevent GPU memory leak
       const timestampUs = Math.round(frameTime * 1_000_000);
       const videoFrame = new VideoFrame(canvas, { timestamp: timestampUs });
-      videoEncoder.encode(videoFrame, { keyFrame: i % (fps * 2) === 0 });
-      videoFrame.close();
+      try {
+        videoEncoder.encode(videoFrame, { keyFrame: i % (fps * 2) === 0 });
+      } finally {
+        videoFrame.close();
+      }
 
-      // Progress reporting (0% -> 85%)
+      // Progress reporting (5% -> 85%)
       const pct = Math.round(5 + ((i + 1) / totalFrames) * 80);
       onProgress?.(pct, `Đang đóng dấu khung hình: ${i + 1}/${totalFrames} (${pct}%)`);
-
-      // Yield event loop every 10 frames
-      if (i % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
     }
 
     onProgress?.(88, 'Đang hoàn tất nén video...');
+
+    // Drain remaining encoder queue
+    while (videoEncoder.encodeQueueSize > 0) {
+      if (signal?.aborted) throw new Error('Đã hủy xuất video');
+      if (encoderError) throw encoderError;
+      await new Promise((r) => setTimeout(r, 15));
+    }
     await videoEncoder.flush();
     videoEncoder.close();
+    videoEncoder = null;
 
     // 7. Encode audio track if present
     if (audioEncoder && audioBuffer) {
@@ -280,14 +351,29 @@ async function renderWithWebCodecs(
         audioFrame.close();
       }
 
+      while (audioEncoder.encodeQueueSize > 0) {
+        if (signal?.aborted) throw new Error('Đã hủy xuất video');
+        await new Promise((r) => setTimeout(r, 15));
+      }
       await audioEncoder.flush();
       audioEncoder.close();
+      audioEncoder = null;
     }
 
     muxer.finalize();
     onProgress?.(100, 'Hoàn thành!');
     return new Blob([target.buffer], { type: 'video/mp4' });
   } finally {
+    if (videoEncoder && (videoEncoder as any).state !== 'closed') {
+      try {
+        videoEncoder.close();
+      } catch {}
+    }
+    if (audioEncoder && (audioEncoder as any).state !== 'closed') {
+      try {
+        audioEncoder.close();
+      } catch {}
+    }
     URL.revokeObjectURL(videoUrl);
   }
 }
