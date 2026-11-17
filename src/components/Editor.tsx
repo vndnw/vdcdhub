@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { WatermarkSettings } from '@/types';
-import { createDefaultSettings, formatTimemarkFilename } from '@/types';
+import type { WatermarkSettings, CropRect } from '@/types';
+import { createDefaultSettings, formatTimemarkFilename, computeMediaCrop } from '@/types';
 import ImageUploader from './ImageUploader';
 import CanvasPreview from './CanvasPreview';
 import ControlPanel from './ControlPanel';
@@ -30,6 +30,11 @@ export default function Editor() {
   const [isExporting, setIsExporting] = useState(false);
   const [mediaInfo, setMediaInfo] = useState<{ width: number; height: number; size: string } | null>(null);
 
+  // Optical zoom & pan state
+  const [zoom, setZoom] = useState<number>(1.0);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [stageDisplaySize, setStageDisplaySize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
   // Video export progress state
   const [videoExportProgress, setVideoExportProgress] = useState<{ progress: number; status: string } | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -49,6 +54,8 @@ export default function Editor() {
     setVideo(null);
     setVideoFile(null);
     setVideoSrc(null);
+    setZoom(1.0);
+    setPan({ x: 0, y: 0 });
     setFileName(file.name.replace(/\.[^.]+$/, ''));
     setMediaInfo({
       width: img.naturalWidth,
@@ -102,6 +109,8 @@ export default function Editor() {
     setVideo(vid);
     setVideoFile(file);
     setVideoSrc(vid.src);
+    setZoom(1.0);
+    setPan({ x: 0, y: 0 });
     setFileName(file.name.replace(/\.[^.]+$/, ''));
     setMediaInfo({
       width: vid.videoWidth || 1280,
@@ -160,10 +169,17 @@ export default function Editor() {
       abortControllerRef.current = abortCtrl;
       setVideoExportProgress({ progress: 0, status: 'Đang chuẩn bị kết xuất video...' });
 
+      const origW = video.videoWidth || 1280;
+      const origH = video.videoHeight || 720;
+      const stageW = stageDisplaySize.width || origW;
+      const stageH = stageDisplaySize.height || origH;
+      const crop = computeMediaCrop(origW, origH, zoom, pan.x, pan.y, stageW, stageH);
+
       try {
         const result = await renderVideoWatermark({
           videoFile,
           settings,
+          crop,
           onProgress: (progress, status) => {
             setVideoExportProgress({ progress, status });
           },
@@ -216,7 +232,13 @@ export default function Editor() {
       setIsExporting(true);
 
       try {
-        const { canvas } = await renderWatermark(image, settings);
+        const origW = image.naturalWidth;
+        const origH = image.naturalHeight;
+        const stageW = stageDisplaySize.width || origW;
+        const stageH = stageDisplaySize.height || origH;
+        const crop = computeMediaCrop(origW, origH, zoom, pan.x, pan.y, stageW, stageH);
+
+        const { canvas } = await renderWatermark(image, settings, crop);
         const blob = await exportCanvasAsBlob(canvas, 0.95);
         const outputFilename = formatTimemarkFilename(settings.dateTime, 'photo');
 
@@ -252,7 +274,7 @@ export default function Editor() {
         setIsExporting(false);
       }
     }
-  }, [image, video, videoFile, settings, fileName]);
+  }, [image, video, videoFile, settings, fileName, zoom, pan, stageDisplaySize]);
 
   // ---- Reset ----
   const handleReset = useCallback(() => {
@@ -263,6 +285,8 @@ export default function Editor() {
     setVideo(null);
     setVideoFile(null);
     setVideoSrc(null);
+    setZoom(1.0);
+    setPan({ x: 0, y: 0 });
     setFileName('');
     setSettings(createDefaultSettings());
     setMediaInfo(null);
@@ -347,6 +371,11 @@ export default function Editor() {
             canvasRef={canvasRef}
             overlayCanvasRef={overlayCanvasRef}
             videoRef={videoRef}
+            zoom={zoom}
+            pan={pan}
+            onZoomChange={setZoom}
+            onPanChange={setPan}
+            onStageSizeChange={setStageDisplaySize}
           />
         </div>
       </div>

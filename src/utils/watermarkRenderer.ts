@@ -3,7 +3,7 @@
 // Draws the original image onto a full-resolution canvas,
 // then applies the selected template watermark.
 // ============================================================
-import type { WatermarkSettings } from '@/types';
+import type { WatermarkSettings, CropRect } from '@/types';
 import { renderClassicTemplate } from './templates/classic';
 import { renderFieldworkTemplate } from './templates/fieldwork';
 import { renderMinimalistTemplate } from './templates/minimalist';
@@ -16,11 +16,13 @@ export interface RenderResult {
 }
 
 /**
- * Render the watermarked image onto a canvas at the original image resolution.
+ * Render the watermarked image onto a canvas at the original image resolution,
+ * applying the optical crop/zoom sub-rectangle if specified.
  */
 export async function renderWatermark(
   imageSource: HTMLImageElement,
-  settings: WatermarkSettings
+  settings: WatermarkSettings,
+  crop?: CropRect
 ): Promise<RenderResult> {
   // Ensure fonts are loaded before rendering
   await loadFonts();
@@ -35,10 +37,14 @@ export async function renderWatermark(
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Failed to get 2D context');
 
-  // Draw the original image at full resolution
-  ctx.drawImage(imageSource, 0, 0, width, height);
+  // Draw the source image with crop (if zoomed) or full image (at 1x)
+  if (crop && (crop.width !== width || crop.height !== height || crop.x !== 0 || crop.y !== 0)) {
+    ctx.drawImage(imageSource, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height);
+  } else {
+    ctx.drawImage(imageSource, 0, 0, width, height);
+  }
 
-  // Render template watermark
+  // Render template watermark at standard scale on top
   drawWatermarkOnly(ctx, settings, width, height);
 
   return { canvas, width, height };
@@ -72,14 +78,15 @@ export function drawWatermarkOnly(
 }
 
 /**
- * Render onto an existing canvas (for preview — may be scaled down).
+ * Render onto an existing canvas (for preview), applying crop if specified.
  */
 export async function renderWatermarkToCanvas(
   targetCanvas: HTMLCanvasElement,
   imageSource: HTMLImageElement,
   settings: WatermarkSettings,
   displayWidth: number,
-  displayHeight: number
+  displayHeight: number,
+  crop?: CropRect
 ): Promise<void> {
   await loadFonts();
 
@@ -92,10 +99,14 @@ export async function renderWatermarkToCanvas(
   const ctx = targetCanvas.getContext('2d');
   if (!ctx) return;
 
-  // Draw original image
-  ctx.drawImage(imageSource, 0, 0, origW, origH);
+  // Draw source image with crop if zoomed
+  if (crop && (crop.width !== origW || crop.height !== origH || crop.x !== 0 || crop.y !== 0)) {
+    ctx.drawImage(imageSource, crop.x, crop.y, crop.width, crop.height, 0, 0, origW, origH);
+  } else {
+    ctx.drawImage(imageSource, 0, 0, origW, origH);
+  }
 
-  // Render template watermark
+  // Render template watermark at standard scale on top
   drawWatermarkOnly(ctx, settings, origW, origH);
 }
 

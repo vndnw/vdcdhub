@@ -5,7 +5,7 @@
 // Fallback: MediaRecorder (canvas.captureStream + video audio)
 // ============================================================
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
-import type { WatermarkSettings } from '@/types';
+import type { WatermarkSettings, CropRect } from '@/types';
 import { formatTimemarkFilename } from '@/types';
 import { drawWatermarkOnly } from './watermarkRenderer';
 import { loadFonts } from './fontLoader';
@@ -13,6 +13,7 @@ import { loadFonts } from './fontLoader';
 export interface VideoRenderOptions {
   videoFile: File;
   settings: WatermarkSettings;
+  crop?: CropRect;
   onProgress?: (progress: number, statusText: string) => void;
   signal?: AbortSignal;
 }
@@ -29,7 +30,7 @@ export interface VideoRenderResult {
 export async function renderVideoWatermark(
   options: VideoRenderOptions
 ): Promise<VideoRenderResult> {
-  const { videoFile, settings, onProgress, signal } = options;
+  const { videoFile, settings, crop, onProgress, signal } = options;
   const outputFilename = formatTimemarkFilename(settings.dateTime, 'video');
 
   await loadFonts();
@@ -41,7 +42,7 @@ export async function renderVideoWatermark(
     typeof VideoFrame !== 'undefined'
   ) {
     try {
-      const blob = await renderWithWebCodecs(videoFile, settings, onProgress, signal);
+      const blob = await renderWithWebCodecs(videoFile, settings, crop, onProgress, signal);
       return { blob, filename: outputFilename };
     } catch (err: any) {
       if (signal?.aborted || err?.message?.includes('cancelled')) {
@@ -52,7 +53,7 @@ export async function renderVideoWatermark(
   }
 
   // Universal Fallback: MediaRecorder
-  const { blob, ext } = await renderWithMediaRecorder(videoFile, settings, onProgress, signal);
+  const { blob, ext } = await renderWithMediaRecorder(videoFile, settings, crop, onProgress, signal);
   return {
     blob,
     filename: ext === 'mp4' ? outputFilename : outputFilename.replace(/\.mp4$/, `.${ext}`),
@@ -65,6 +66,7 @@ export async function renderVideoWatermark(
 async function renderWithWebCodecs(
   videoFile: File,
   settings: WatermarkSettings,
+  crop?: CropRect,
   onProgress?: (progress: number, statusText: string) => void,
   signal?: AbortSignal
 ): Promise<Blob> {
@@ -209,8 +211,12 @@ async function renderWithWebCodecs(
         video.addEventListener('seeked', onSeeked);
       });
 
-      // Draw original video frame
-      ctx.drawImage(video, 0, 0, encWidth, encHeight);
+      // Draw original video frame with optical crop/zoom if specified
+      if (crop && (crop.width !== origW || crop.height !== origH || crop.x !== 0 || crop.y !== 0)) {
+        ctx.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, encWidth, encHeight);
+      } else {
+        ctx.drawImage(video, 0, 0, encWidth, encHeight);
+      }
 
       // Real-time ticking timestamp: base time + elapsed seconds
       const frameDate = new Date(settings.dateTime.getTime() + Math.round(frameTime * 1000));
@@ -293,6 +299,7 @@ async function renderWithWebCodecs(
 async function renderWithMediaRecorder(
   videoFile: File,
   settings: WatermarkSettings,
+  crop?: CropRect,
   onProgress?: (progress: number, statusText: string) => void,
   signal?: AbortSignal
 ): Promise<{ blob: Blob; ext: string }> {
@@ -386,7 +393,11 @@ async function renderWithMediaRecorder(
         return;
       }
 
-      ctx.drawImage(video, 0, 0, width, height);
+      if (crop && (crop.width !== width || crop.height !== height || crop.x !== 0 || crop.y !== 0)) {
+        ctx.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, width, height);
+      } else {
+        ctx.drawImage(video, 0, 0, width, height);
+      }
 
       // Ticking watermark timestamp
       const frameDate = new Date(settings.dateTime.getTime() + Math.round(video.currentTime * 1000));

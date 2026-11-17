@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import type { WatermarkSettings } from '@/types';
+import type { WatermarkSettings, CropRect } from '@/types';
+import { computeMediaCrop } from '@/types';
 import { renderWatermarkToCanvas, drawWatermarkOnly } from '@/utils/watermarkRenderer';
 import { loadFonts } from '@/utils/fontLoader';
 import {
@@ -22,6 +23,11 @@ interface CanvasPreviewProps {
   canvasRef: React.RefObject<HTMLCanvasElement>;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement>;
   videoRef?: React.RefObject<HTMLVideoElement>;
+  zoom: number;
+  pan: { x: number; y: number };
+  onZoomChange: (newZoom: number) => void;
+  onPanChange: (newPan: { x: number; y: number }) => void;
+  onStageSizeChange?: (size: { width: number; height: number }) => void;
 }
 
 export default function CanvasPreview({
@@ -32,9 +38,13 @@ export default function CanvasPreview({
   canvasRef,
   overlayCanvasRef,
   videoRef,
+  zoom,
+  pan,
+  onZoomChange,
+  onPanChange,
+  onStageSizeChange,
 }: CanvasPreviewProps) {
-  // Viewport & Scroll Container DOM Refs
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const internalVideoRef = useRef<HTMLVideoElement>(null);
   const activeVideoRef = videoRef || internalVideoRef;
@@ -45,28 +55,15 @@ export default function CanvasPreview({
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const renderRef = useRef(0);
 
-  // Zoom state (UI only, does not affect export resolution)
-  const [zoom, setZoom] = useState<number>(1.0);
-
-  // Desktop mouse drag-to-scroll support
-  const isMouseDownRef = useRef(false);
-  const mouseStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
+  // Dragging state for panning the media
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Video playback & timeline state
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(true);
   const [videoCurrentTime, setVideoCurrentTime] = useState<number>(0);
   const [videoDuration, setVideoDuration] = useState<number>(0);
-
-  // Reset zoom when image or video changes
-  useEffect(() => {
-    setZoom(1.0);
-    setVideoCurrentTime(0);
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollLeft = 0;
-      scrollContainerRef.current.scrollTop = 0;
-    }
-  }, [image, videoSrc]);
 
   // Determine media natural dimensions
   const mediaWidth = video
@@ -100,52 +97,122 @@ export default function CanvasPreview({
       }
     }
 
-    return { width, height };
+    return { width: Math.round(width), height: Math.round(height) };
   }, [mediaWidth, mediaHeight, containerSize]);
+
+  // Notify parent of stage size for export crop calculations
+  useEffect(() => {
+    if (stageSize.width > 0 && stageSize.height > 0) {
+      onStageSizeChange?.(stageSize);
+    }
+  }, [stageSize, onStageSizeChange]);
+
+  // Optical crop bounds: Clamp pan so no black bars ever appear around edges
+  const maxPanX = useMemo(() => {
+    return (stageSize.width * (Math.max(1.0, zoom) - 1)) / 2;
+  }, [stageSize.width, zoom]);
+
+  const maxPanY = useMemo(() => {
+    return (stageSize.height * (Math.max(1.0, zoom) - 1)) / 2;
+  }, [stageSize.height, zoom]);
 
   const handleZoomChange = (newZoom: number) => {
     const clamped = Math.max(1.0, Math.min(3.0, newZoom));
-    setZoom(clamped);
-    if (clamped <= 1.0 && scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
+    onZoomChange(clamped);
+
+    if (clamped <= 1.0) {
+      onPanChange({ x: 0, y: 0 });
+    } else {
+      const newMaxX = (stageSize.width * (clamped - 1)) / 2;
+      const newMaxY = (stageSize.height * (clamped - 1)) / 2;
+      onPanChange({
+        x: Math.max(-newMaxX, Math.min(newMaxX, pan.x)),
+        y: Math.max(-newMaxY, Math.min(newMaxY, pan.y)),
+      });
     }
   };
 
   const handleResetZoom = () => {
-    setZoom(1.0);
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
-    }
+    onZoomChange(1.0);
+    onPanChange({ x: 0, y: 0 });
   };
 
-  // Desktop mouse drag-to-scroll handlers
+  // Mouse drag handlers
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (zoom <= 1.0 || !scrollContainerRef.current) return;
-    isMouseDownRef.current = true;
-    mouseStartRef.current = {
-      x: e.clientX,
-      y: e.clientY,
-      scrollLeft: scrollContainerRef.current.scrollLeft,
-      scrollTop: scrollContainerRef.current.scrollTop,
+    if (zoom <= 1.0) return;
+    setIsDragging(true);
+    dragStartRef.current = {
+      x: e.clientX - pan.x,
+      y: e.clientY - pan.y,
     };
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isMouseDownRef.current || zoom <= 1.0 || !scrollContainerRef.current) return;
+    if (!isDragging || zoom <= 1.0) return;
     e.preventDefault();
-    const dx = e.clientX - mouseStartRef.current.x;
-    const dy = e.clientY - mouseStartRef.current.y;
-    scrollContainerRef.current.scrollLeft = mouseStartRef.current.scrollLeft - dx;
-    scrollContainerRef.current.scrollTop = mouseStartRef.current.scrollTop - dy;
+
+    const proposedX = e.clientX - dragStartRef.current.x;
+    const proposedY = e.clientY - dragStartRef.current.y;
+
+    onPanChange({
+      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
+      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
+    });
   };
 
   const handleMouseUp = () => {
-    isMouseDownRef.current = false;
+    setIsDragging(false);
   };
+
+  // Touch drag handlers for mobile
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (zoom <= 1.0 || e.touches.length !== 1) return;
+    setIsDragging(true);
+    dragStartRef.current = {
+      x: e.touches[0].clientX - pan.x,
+      y: e.touches[0].clientY - pan.y,
+    };
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isDragging || zoom <= 1.0 || e.touches.length !== 1) return;
+    if (e.cancelable) e.preventDefault();
+
+    const proposedX = e.touches[0].clientX - dragStartRef.current.x;
+    const proposedY = e.touches[0].clientY - dragStartRef.current.y;
+
+    onPanChange({
+      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
+      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
+    });
+  };
+
+  const handleTouchEnd = () => {
+    setIsDragging(false);
+  };
+
+  // Window release listener to prevent drag sticking
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onRelease = () => {
+      setIsDragging(false);
+    };
+
+    window.addEventListener('mouseup', onRelease);
+    window.addEventListener('touchend', onRelease);
+    window.addEventListener('touchcancel', onRelease);
+
+    return () => {
+      window.removeEventListener('mouseup', onRelease);
+      window.removeEventListener('touchend', onRelease);
+      window.removeEventListener('touchcancel', onRelease);
+    };
+  }, [isDragging]);
 
   // Observe container size
   useEffect(() => {
-    const container = scrollContainerRef.current;
+    const container = containerRef.current;
     if (!container) return;
 
     const observer = new ResizeObserver((entries) => {
@@ -159,8 +226,21 @@ export default function CanvasPreview({
     return () => observer.disconnect();
   }, []);
 
+  // Compute exact optical crop for the photo
+  const currentCrop = useMemo(() => {
+    return computeMediaCrop(
+      mediaWidth,
+      mediaHeight,
+      zoom,
+      pan.x,
+      pan.y,
+      stageSize.width,
+      stageSize.height
+    );
+  }, [mediaWidth, mediaHeight, zoom, pan, stageSize]);
+
   // -------------------------------------------------------------
-  // 1. IMAGE: Render watermark whenever settings or image changes
+  // 1. IMAGE: Render cropped photo + standard unscaled Timemark watermark
   // -------------------------------------------------------------
   useEffect(() => {
     if (!image) return;
@@ -173,14 +253,21 @@ export default function CanvasPreview({
       if (renderId !== renderRef.current) return;
 
       try {
-        await renderWatermarkToCanvas(canvas, image, settings, stageSize.width, stageSize.height);
+        await renderWatermarkToCanvas(
+          canvas,
+          image,
+          settings,
+          stageSize.width,
+          stageSize.height,
+          currentCrop
+        );
       } catch (err) {
         console.error('Image render failed:', err);
       }
     }, 16);
 
     return () => clearTimeout(timeout);
-  }, [image, settings, containerSize, canvasRef, stageSize]);
+  }, [image, settings, containerSize, canvasRef, stageSize, currentCrop]);
 
   // -------------------------------------------------------------
   // 2. VIDEO: Real-time ticking watermark overlay renderer
@@ -209,6 +296,7 @@ export default function CanvasPreview({
     const frameDate = new Date(settings.dateTime.getTime() + Math.floor(curTime) * 1000);
     const frameSettings = { ...settings, dateTime: frameDate };
 
+    // Watermark sits fixed and unscaled at the corners of the output frame
     drawWatermarkOnly(ctx, frameSettings, origW, origH);
   }, [video, activeOverlayRef, activeVideoRef, settings]);
 
@@ -284,8 +372,6 @@ export default function CanvasPreview({
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  const isZoomed = zoom > 1.0;
-
   return (
     <div className="w-full h-full flex flex-col overflow-hidden bg-black/90 relative">
       {/* ---------------- Video Playback Header Bar ---------------- */}
@@ -329,37 +415,36 @@ export default function CanvasPreview({
         </div>
       )}
 
-      {/* ---------------- Native Scrollable Media Viewport ---------------- */}
+      {/* ---------------- Viewport Frame (Holds Optical Crop Frame) ---------------- */}
       <div
-        ref={scrollContainerRef}
-        className={`flex-1 w-full overflow-auto select-none ${
-          isZoomed ? 'cursor-grab active:cursor-grabbing p-3 sm:p-4 pb-8' : 'flex items-center justify-center p-2 sm:p-3'
-        }`}
-        style={{
-          WebkitOverflowScrolling: 'touch',
-          touchAction: isZoomed ? 'pan-x pan-y' : 'auto',
-        }}
+        ref={containerRef}
+        className="flex-1 w-full flex items-center justify-center p-2 sm:p-3 overflow-hidden select-none"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        style={{
+          touchAction: zoom > 1.0 ? 'none' : 'auto',
+          cursor: zoom > 1.0 ? (isDragging ? 'grabbing' : 'grab') : 'default',
+        }}
       >
-        {/* Single Unified Inner Stage: Locks Timemark Canvas tightly to the Media */}
+        {/* Output Crop Frame: Represents the exact 100% final output frame */}
         <div
           style={{
+            width: `${stageSize.width}px`,
+            height: `${stageSize.height}px`,
             position: 'relative',
-            display: 'inline-block',
+            overflow: 'hidden',
             lineHeight: 0,
-            width: isZoomed ? `${Math.round(stageSize.width * zoom)}px` : `${Math.round(stageSize.width)}px`,
-            height: isZoomed ? `${Math.round(stageSize.height * zoom)}px` : `${Math.round(stageSize.height)}px`,
-            maxWidth: isZoomed ? 'none' : '100%',
-            maxHeight: isZoomed ? 'none' : '100%',
-            flexShrink: 0,
-            margin: isZoomed ? 'auto' : undefined,
-            transition: 'width 0.15s ease-out, height 0.15s ease-out',
+            boxShadow: '0 8px 30px rgba(0, 0, 0, 0.6)',
           }}
+          className="rounded-sm bg-neutral-950"
         >
-          {/* VIDEO MODE */}
+          {/* VIDEO MODE: Video zooms & pans underneath; Timemark overlay stays fixed on top */}
           {video && (
             <>
               <video
@@ -369,6 +454,8 @@ export default function CanvasPreview({
                   width: '100%',
                   height: '100%',
                   display: 'block',
+                  transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+                  transformOrigin: 'center center',
                   pointerEvents: 'none',
                 }}
                 className="rounded-sm"
@@ -378,7 +465,7 @@ export default function CanvasPreview({
                 autoPlay
                 controls={false}
               />
-              {/* Live transparent overlay canvas for real-time ticking watermark */}
+              {/* Fixed, unscaled Timemark overlay canvas for video */}
               <canvas
                 ref={activeOverlayRef}
                 style={{
@@ -392,7 +479,7 @@ export default function CanvasPreview({
             </>
           )}
 
-          {/* IMAGE MODE */}
+          {/* IMAGE MODE: Canvas renders optical crop + fixed, crisp Timemark watermark */}
           {image && (
             <canvas
               ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
@@ -408,10 +495,13 @@ export default function CanvasPreview({
         </div>
       </div>
 
-      {/* ---------------- Dedicated Slim Zoom Control Bar (Below Preview Frame - Zero Overlap) ---------------- */}
-      <div className="flex-none h-10 border-t border-editor-border bg-editor-surface/95 px-3 sm:px-4 flex items-center justify-between sm:justify-center gap-2 sm:gap-4 select-none z-20">
+      {/* ---------------- Dedicated Camera Zoom Slider Bar (Zero Overlap) ---------------- */}
+      <div className="flex-none h-11 border-t border-editor-border bg-editor-surface/95 px-3 sm:px-4 flex items-center justify-between sm:justify-center gap-2 sm:gap-4 select-none z-20">
         <div className="flex items-center gap-1.5 sm:gap-2">
-          <span className="text-[11px] font-medium text-neutral-400 hidden xs:inline">Thu phóng:</span>
+          <span className="text-[11px] font-semibold text-neutral-300 flex items-center gap-1">
+            <ZoomIn size={13} className="text-accent" />
+            <span className="hidden xs:inline">Thu phóng:</span>
+          </span>
 
           <button
             type="button"
@@ -431,7 +521,7 @@ export default function CanvasPreview({
             value={zoom}
             onChange={(e) => handleZoomChange(parseFloat(e.target.value))}
             className="w-24 sm:w-36 h-1.5 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-accent"
-            aria-label="Độ phóng đại"
+            aria-label="Độ phóng đại quang học"
           />
 
           <button
@@ -444,20 +534,20 @@ export default function CanvasPreview({
             <ZoomIn size={14} />
           </button>
 
-          <span className="text-[11px] font-mono font-bold text-neutral-300 w-11 text-center">
-            {Math.round(zoom * 100)}%
+          <span className="text-[11px] font-mono font-bold text-accent w-11 text-center">
+            {zoom.toFixed(1)}x
           </span>
         </div>
 
-        {isZoomed && (
+        {zoom > 1.0 && (
           <button
             type="button"
             onClick={handleResetZoom}
             className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-accent text-black hover:bg-accent-light active:scale-95 transition-all shadow-sm flex items-center gap-1"
-            title="Đặt lại kích thước ban đầu (1x)"
+            title="Đặt lại góc chụp ban đầu (1.0x)"
           >
             <RotateCcw size={10} />
-            <span>1x</span>
+            <span>1.0x</span>
           </button>
         )}
       </div>

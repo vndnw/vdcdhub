@@ -174,6 +174,58 @@ export function formatCoordinates(lat: number | null, lng: number | null): strin
   return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Compute the source media crop rectangle (x, y, width, height)
+ * based on zoom (1.0x - 3.0x) and display pan coordinates.
+ * Clamps strictly within media bounds to ensure zero empty black bars.
+ */
+export function computeMediaCrop(
+  origW: number,
+  origH: number,
+  zoom: number,
+  panX: number,
+  panY: number,
+  stageW: number,
+  stageH: number
+): CropRect {
+  const clampedZoom = Math.max(1.0, Math.min(3.0, zoom));
+  const cropWidth = origW / clampedZoom;
+  const cropHeight = origH / clampedZoom;
+
+  if (clampedZoom <= 1.0) {
+    return { x: 0, y: 0, width: origW, height: origH };
+  }
+
+  const maxPanX = (stageW * (clampedZoom - 1)) / 2;
+  const maxPanY = (stageH * (clampedZoom - 1)) / 2;
+
+  const clampedPanX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+  const clampedPanY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+
+  const normPanX = maxPanX > 0 ? clampedPanX / maxPanX : 0;
+  const normPanY = maxPanY > 0 ? clampedPanY / maxPanY : 0;
+
+  const centerCropX = (origW - cropWidth) / 2;
+  const centerCropY = (origH - cropHeight) / 2;
+
+  const cropX = Math.round(centerCropX - normPanX * centerCropX);
+  const cropY = Math.round(centerCropY - normPanY * centerCropY);
+
+  return {
+    x: Math.max(0, Math.min(origW - cropWidth, cropX)),
+    y: Math.max(0, Math.min(origH - cropHeight, cropY)),
+    width: Math.round(cropWidth),
+    height: Math.round(cropHeight),
+  };
+}
+
 /**
  * Generate authentic Timemark filename based on the selected watermark Date & Time:
  * - Photo: IMG_YYYYMMDD_HHMMSS.jpg
