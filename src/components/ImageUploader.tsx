@@ -2,6 +2,7 @@
 
 import React, { useCallback, useRef, useState } from 'react';
 import { Upload, Film, Image as ImageIcon, X } from 'lucide-react';
+import BrandLogo from './BrandLogo';
 
 interface MediaUploaderProps {
   onImageLoad: (file: File, img: HTMLImageElement) => void;
@@ -100,13 +101,14 @@ export default function ImageUploader({ onImageLoad, onVideoLoad }: MediaUploade
       <div className="w-full max-w-lg text-center">
         {/* Header */}
         <div className="mb-6 sm:mb-8">
-          <div className="inline-flex items-center gap-2 mb-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-accent to-accent-dark flex items-center justify-center shadow-md shadow-accent/20">
-              <span className="font-extrabold text-sm text-black">VH</span>
+          <div className="inline-flex items-center gap-2.5 mb-3">
+            <BrandLogo size={46} />
+            <div className="flex items-center gap-1.5 font-black text-2xl sm:text-3xl tracking-tight">
+              <span className="text-white">VDCD</span>
+              <span className="inline-block px-2.5 py-0.5 rounded-lg text-lg sm:text-xl font-black text-[#111111] bg-[#F59E0B] shadow-sm transform -rotate-2 select-none">
+                Húp
+              </span>
             </div>
-            <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
-              VDCD <span className="text-accent">Húp</span>
-            </h1>
           </div>
           <p className="text-neutral-400 text-xs sm:text-sm max-w-sm mx-auto">
             Đóng dấu ngày giờ, địa chỉ chính xác chuẩn Timemark lên ảnh & video.

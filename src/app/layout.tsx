@@ -5,6 +5,16 @@ export const metadata: Metadata = {
   title: 'VDCD Húp - Đóng dấu ảnh & video thời gian & địa điểm chuẩn Timemark',
   description:
     'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh và video trực tiếp trên trình duyệt.',
+  icons: {
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+  },
+  manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
