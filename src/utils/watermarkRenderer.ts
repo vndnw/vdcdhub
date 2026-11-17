@@ -38,11 +38,24 @@ export async function renderWatermark(
   // Draw the original image at full resolution
   ctx.drawImage(imageSource, 0, 0, width, height);
 
-  // Calculate the scale factor based on image dimensions
-  // Reference: 1000px dimension = 1.0x scale
+  // Render template watermark
+  drawWatermarkOnly(ctx, settings, width, height);
+
+  return { canvas, width, height };
+}
+
+/**
+ * Render only the watermark elements (text, pin, badge, hash, logo)
+ * onto a 2D canvas context without clearing or drawing a background image.
+ */
+export function drawWatermarkOnly(
+  ctx: CanvasRenderingContext2D,
+  settings: WatermarkSettings,
+  width: number,
+  height: number
+): void {
   const scaleFactor = (Math.min(width, height) / 1000) * settings.scale;
 
-  // Select and render the template
   switch (settings.template) {
     case 'classic':
       renderClassicTemplate(ctx, settings, width, height, scaleFactor);
@@ -56,8 +69,6 @@ export async function renderWatermark(
     default:
       renderClassicTemplate(ctx, settings, width, height, scaleFactor);
   }
-
-  return { canvas, width, height };
 }
 
 /**
@@ -84,21 +95,8 @@ export async function renderWatermarkToCanvas(
   // Draw original image
   ctx.drawImage(imageSource, 0, 0, origW, origH);
 
-  // Scale factor
-  const scaleFactor = (Math.min(origW, origH) / 1000) * settings.scale;
-
-  // Render template
-  switch (settings.template) {
-    case 'classic':
-      renderClassicTemplate(ctx, settings, origW, origH, scaleFactor);
-      break;
-    case 'fieldwork':
-      renderFieldworkTemplate(ctx, settings, origW, origH, scaleFactor);
-      break;
-    case 'minimalist':
-      renderMinimalistTemplate(ctx, settings, origW, origH, scaleFactor);
-      break;
-  }
+  // Render template watermark
+  drawWatermarkOnly(ctx, settings, origW, origH);
 }
 
 /**

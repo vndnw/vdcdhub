@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useCallback, useRef, useState } from 'react';
-import { Upload, Image as ImageIcon, X } from 'lucide-react';
+import { Upload, Film, Image as ImageIcon, X } from 'lucide-react';
 
-interface ImageUploaderProps {
+interface MediaUploaderProps {
   onImageLoad: (file: File, img: HTMLImageElement) => void;
+  onVideoLoad: (file: File, video: HTMLVideoElement) => void;
 }
 
-export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
+export default function ImageUploader({ onImageLoad, onVideoLoad }: MediaUploaderProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -16,24 +17,46 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
     (file: File) => {
       setError(null);
 
-      // Validate file size (max 50MB)
-      if (file.size > 50 * 1024 * 1024) {
-        setError('Ảnh quá lớn. Vui lòng chọn ảnh dưới 50MB.');
+      // Validate file size (max 200MB for video, 50MB for image)
+      const isVideo =
+        file.type.startsWith('video/') ||
+        /\.(mp4|mov|webm|m4v|mkv|avi)$/i.test(file.name);
+
+      const maxLimit = isVideo ? 200 * 1024 * 1024 : 50 * 1024 * 1024;
+      if (file.size > maxLimit) {
+        setError(`Tệp quá lớn. Vui lòng chọn ${isVideo ? 'video dưới 200MB' : 'ảnh dưới 50MB'}.`);
         return;
       }
 
       const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        onImageLoad(file, img);
-      };
-      img.onerror = () => {
-        setError('Không thể đọc file ảnh này. Vui lòng thử ảnh khác.');
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
+
+      if (isVideo) {
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.muted = true;
+        video.playsInline = true;
+
+        video.onloadedmetadata = () => {
+          onVideoLoad(file, video);
+        };
+        video.onerror = () => {
+          setError('Không thể đọc file video này. Vui lòng thử video khác (MP4, MOV, WEBM).');
+          URL.revokeObjectURL(url);
+        };
+        video.src = url;
+      } else {
+        const img = new Image();
+        img.onload = () => {
+          onImageLoad(file, img);
+        };
+        img.onerror = () => {
+          setError('Không thể đọc file ảnh này. Vui lòng thử ảnh khác.');
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
+      }
     },
-    [onImageLoad]
+    [onImageLoad, onVideoLoad]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -79,14 +102,14 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
         <div className="mb-6 sm:mb-8">
           <div className="inline-flex items-center gap-2 mb-3">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-accent to-accent-dark flex items-center justify-center shadow-md shadow-accent/20">
-              <ImageIcon size={20} className="text-black" />
+              <span className="font-extrabold text-sm text-black">VH</span>
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight">
               VDCD <span className="text-accent">Húp</span>
             </h1>
           </div>
           <p className="text-neutral-400 text-xs sm:text-sm max-w-sm mx-auto">
-            Đóng dấu ngày giờ, địa chỉ chính xác chuẩn Timemark lên ảnh.
+            Đóng dấu ngày giờ, địa chỉ chính xác chuẩn Timemark lên ảnh & video.
           </p>
         </div>
 
@@ -103,7 +126,7 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
           <input
             ref={inputRef}
             type="file"
-            accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif"
+            accept="image/*,video/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.mp4,.mov,.webm,.m4v"
             onChange={handleFileChange}
             className="hidden"
           />
@@ -119,11 +142,20 @@ export default function ImageUploader({ onImageLoad }: ImageUploaderProps) {
 
             <div>
               <p className="text-white font-medium text-sm mb-1">
-                {isDragging ? 'Thả ảnh vào đây' : 'Nhấn để chọn ảnh từ máy'}
+                {isDragging ? 'Thả tệp vào đây' : 'Nhấn để chọn ảnh hoặc video từ máy'}
               </p>
               <p className="text-neutral-500 text-xs">
-                hoặc kéo thả ảnh • Hỗ trợ JPG, PNG, WEBP, HEIC
+                hoặc kéo thả tệp • Hỗ trợ JPG, PNG, MP4, MOV, WEBM, HEIC
               </p>
+            </div>
+
+            <div className="flex items-center gap-2 mt-1">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-white/5 border border-white/10 text-neutral-400">
+                <ImageIcon size={10} /> Ảnh
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-accent/10 border border-accent/20 text-accent">
+                <Film size={10} /> Video + Âm thanh
+              </span>
             </div>
           </div>
         </div>

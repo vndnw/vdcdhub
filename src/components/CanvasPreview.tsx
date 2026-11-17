@@ -2,17 +2,44 @@
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import type { WatermarkSettings } from '@/types';
-import { renderWatermarkToCanvas } from '@/utils/watermarkRenderer';
-import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { renderWatermarkToCanvas, drawWatermarkOnly } from '@/utils/watermarkRenderer';
+import { loadFonts } from '@/utils/fontLoader';
+import {
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 
 interface CanvasPreviewProps {
-  image: HTMLImageElement;
+  image?: HTMLImageElement | null;
+  video?: HTMLVideoElement | null;
+  videoSrc?: string | null;
   settings: WatermarkSettings;
   canvasRef: React.RefObject<HTMLCanvasElement>;
+  overlayCanvasRef?: React.RefObject<HTMLCanvasElement>;
+  videoRef?: React.RefObject<HTMLVideoElement>;
 }
 
-export default function CanvasPreview({ image, settings, canvasRef }: CanvasPreviewProps) {
+export default function CanvasPreview({
+  image,
+  video,
+  videoSrc,
+  settings,
+  canvasRef,
+  overlayCanvasRef,
+  videoRef,
+}: CanvasPreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const internalVideoRef = useRef<HTMLVideoElement>(null);
+  const activeVideoRef = videoRef || internalVideoRef;
+
+  const internalOverlayRef = useRef<HTMLCanvasElement>(null);
+  const activeOverlayRef = overlayCanvasRef || internalOverlayRef;
+
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const renderRef = useRef(0);
 
@@ -22,14 +49,33 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Reset zoom & pan when a new image is loaded
+  // Video playback & timeline state
+  const [isPlaying, setIsPlaying] = useState<boolean>(true);
+  const [isMuted, setIsMuted] = useState<boolean>(true);
+  const [videoCurrentTime, setVideoCurrentTime] = useState<number>(0);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
+
+  // Reset zoom & pan when image or video changes
   useEffect(() => {
     setZoom(1.0);
     setPan({ x: 0, y: 0 });
-  }, [image]);
+    setVideoCurrentTime(0);
+  }, [image, videoSrc]);
+
+  // Determine media natural dimensions
+  const mediaWidth = video
+    ? video.videoWidth || 1280
+    : image
+    ? image.naturalWidth || 1000
+    : 1000;
+  const mediaHeight = video
+    ? video.videoHeight || 720
+    : image
+    ? image.naturalHeight || 1000
+    : 1000;
 
   // Calculate base rendered dimensions fitting the container at 1x
-  const imgAspect = image.naturalWidth / image.naturalHeight;
+  const imgAspect = mediaWidth / mediaHeight;
   const containerAspect =
     containerSize.width > 0 && containerSize.height > 0
       ? containerSize.width / containerSize.height
@@ -171,26 +217,130 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
     return () => observer.disconnect();
   }, []);
 
-  // Render watermark whenever settings or image change
+  // -------------------------------------------------------------
+  // 1. IMAGE: Render watermark whenever settings or image changes
+  // -------------------------------------------------------------
   useEffect(() => {
+    if (!image) return;
     const canvas = canvasRef.current;
-    if (!canvas || !image || containerSize.width === 0) return;
+    if (!canvas || containerSize.width === 0) return;
 
     const renderId = ++renderRef.current;
 
-    // Debounce renders
     const timeout = setTimeout(async () => {
       if (renderId !== renderRef.current) return;
 
       try {
         await renderWatermarkToCanvas(canvas, image, settings, baseWidth, baseHeight);
       } catch (err) {
-        console.error('Render failed:', err);
+        console.error('Image render failed:', err);
       }
-    }, 16); // ~60fps target
+    }, 16);
 
     return () => clearTimeout(timeout);
   }, [image, settings, containerSize, canvasRef, baseWidth, baseHeight]);
+
+  // -------------------------------------------------------------
+  // 2. VIDEO: Real-time ticking watermark overlay renderer
+  // -------------------------------------------------------------
+  const renderVideoOverlay = useCallback(() => {
+    const overlay = activeOverlayRef.current;
+    const v = activeVideoRef.current;
+    if (!overlay || !video || !v) return;
+
+    const ctx = overlay.getContext('2d');
+    if (!ctx) return;
+
+    const origW = v.videoWidth || 1280;
+    const origH = v.videoHeight || 720;
+
+    if (overlay.width !== origW || overlay.height !== origH) {
+      overlay.width = origW;
+      overlay.height = origH;
+    }
+
+    // Clear previous watermark frame
+    ctx.clearRect(0, 0, origW, origH);
+
+    // Advance clock in real time by video's elapsed seconds
+    const curTime = v.currentTime || 0;
+    const frameDate = new Date(settings.dateTime.getTime() + Math.floor(curTime) * 1000);
+    const frameSettings = { ...settings, dateTime: frameDate };
+
+    drawWatermarkOnly(ctx, frameSettings, origW, origH);
+  }, [video, activeOverlayRef, activeVideoRef, settings]);
+
+  // Update video overlay when settings or time changes
+  useEffect(() => {
+    if (!video) return;
+    loadFonts().then(() => {
+      renderVideoOverlay();
+    });
+  }, [video, settings, renderVideoOverlay]);
+
+  // Video timeupdate and loadedmetadata listeners
+  useEffect(() => {
+    const v = activeVideoRef.current;
+    if (!video || !v) return;
+
+    const onTimeUpdate = () => {
+      setVideoCurrentTime(v.currentTime);
+      renderVideoOverlay();
+    };
+
+    const onLoadedMetadata = () => {
+      setVideoDuration(v.duration || 0);
+      renderVideoOverlay();
+    };
+
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+
+    v.addEventListener('timeupdate', onTimeUpdate);
+    v.addEventListener('loadedmetadata', onLoadedMetadata);
+    v.addEventListener('play', onPlay);
+    v.addEventListener('pause', onPause);
+
+    return () => {
+      v.removeEventListener('timeupdate', onTimeUpdate);
+      v.removeEventListener('loadedmetadata', onLoadedMetadata);
+      v.removeEventListener('play', onPlay);
+      v.removeEventListener('pause', onPause);
+    };
+  }, [video, activeVideoRef, renderVideoOverlay]);
+
+  // Video playback controls
+  const togglePlay = () => {
+    const v = activeVideoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      v.play();
+    } else {
+      v.pause();
+    }
+  };
+
+  const toggleMute = () => {
+    const v = activeVideoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setIsMuted(v.muted);
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = activeVideoRef.current;
+    if (!v) return;
+    const targetTime = parseFloat(e.target.value);
+    v.currentTime = targetTime;
+    setVideoCurrentTime(targetTime);
+    renderVideoOverlay();
+  };
+
+  const formatTimeCode = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
 
   return (
     <div
@@ -213,25 +363,95 @@ export default function CanvasPreview({ image, settings, canvasRef }: CanvasPrev
       onTouchEnd={handleTouchEnd}
       onTouchCancel={handleTouchEnd}
     >
-      {/* Canvas Viewport: Exact Fit at 1x, Smooth Scaled & Panned when Zoomed */}
-      <canvas
-        ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
+      {/* ---------------- Video Playback Header Bar ---------------- */}
+      {video && (
+        <div
+          className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/80 backdrop-blur-md border border-white/15 shadow-xl text-white select-none pointer-events-auto"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={togglePlay}
+            className="p-1 rounded-full text-neutral-300 hover:text-white active:scale-95 transition-all"
+            title={isPlaying ? 'Tạm dừng' : 'Phát video'}
+          >
+            {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+          </button>
+
+          <input
+            type="range"
+            min="0"
+            max={videoDuration || 1}
+            step="0.05"
+            value={videoCurrentTime}
+            onChange={handleSeek}
+            className="w-20 sm:w-28 h-1.5 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-accent"
+            aria-label="Tua video"
+          />
+
+          <span className="text-[10px] font-mono text-neutral-300">
+            {formatTimeCode(videoCurrentTime)}/{formatTimeCode(videoDuration)}
+          </span>
+
+          <button
+            type="button"
+            onClick={toggleMute}
+            className="p-1 rounded-full text-neutral-300 hover:text-white active:scale-95 transition-all"
+            title={isMuted ? 'Bật âm thanh' : 'Tắt tiếng'}
+          >
+            {isMuted ? <VolumeX size={13} className="text-amber-400" /> : <Volume2 size={13} />}
+          </button>
+        </div>
+      )}
+
+      {/* ---------------- Scaled & Panned Media Viewport ---------------- */}
+      <div
         style={{
           width: `${Math.round(baseWidth)}px`,
           height: `${Math.round(baseHeight)}px`,
           maxWidth: '100%',
           maxHeight: '100%',
-          objectFit: 'contain',
+          position: 'relative',
           transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
           transformOrigin: 'center center',
           willChange: 'transform',
           transition: isDragging ? 'none' : 'transform 0.12s cubic-bezier(0, 0, 0.2, 1)',
           cursor: zoom > 1.0 ? (isDragging ? 'grabbing' : 'grab') : 'default',
-          pointerEvents: 'none',
         }}
-      />
+      >
+        {/* VIDEO MODE */}
+        {video && (
+          <>
+            <video
+              ref={activeVideoRef}
+              src={videoSrc || video.src}
+              className="w-full h-full object-contain pointer-events-none rounded-sm"
+              playsInline
+              loop
+              muted={isMuted}
+              autoPlay
+              controls={false}
+            />
+            {/* Live transparent overlay canvas for real-time ticking watermark */}
+            <canvas
+              ref={activeOverlayRef}
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+            />
+          </>
+        )}
 
-      {/* Floating Zoom Controls Bar */}
+        {/* IMAGE MODE */}
+        {image && (
+          <canvas
+            ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
+            className="w-full h-full object-contain pointer-events-none rounded-sm"
+          />
+        )}
+      </div>
+
+      {/* ---------------- Floating Zoom Controls Bar (Bottom) ---------------- */}
       <div
         className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 sm:gap-2 px-3 py-1.5 rounded-full bg-black/80 backdrop-blur-md border border-white/15 shadow-xl text-white select-none pointer-events-auto"
         onClick={(e) => e.stopPropagation()}

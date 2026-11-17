@@ -2,18 +2,18 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'VDCD Húp - Đóng dấu ảnh thời gian & địa điểm chuẩn Timemark',
+  title: 'VDCD Húp - Đóng dấu ảnh & video thời gian & địa điểm chuẩn Timemark',
   description:
-    'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt.',
+    'Ứng dụng đóng dấu ngày giờ, toạ độ GPS, địa chỉ chuẩn Timemark lên ảnh và video trực tiếp trên trình duyệt.',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
     title: 'VDCD Húp',
   },
   openGraph: {
-    title: 'VDCD Húp - Đóng dấu ảnh chuẩn Timemark',
+    title: 'VDCD Húp - Đóng dấu ảnh & video chuẩn Timemark',
     description:
-      'Đóng dấu ngày giờ, toạ độ, địa chỉ chuẩn Timemark lên ảnh trực tiếp trên trình duyệt.',
+      'Đóng dấu ngày giờ, toạ độ, địa chỉ chuẩn Timemark lên ảnh và video trực tiếp trên trình duyệt.',
     type: 'website',
   },
 };
