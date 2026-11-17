@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { WatermarkSettings } from '@/types';
 import { renderWatermarkToCanvas, drawWatermarkOnly } from '@/utils/watermarkRenderer';
 import { loadFonts } from '@/utils/fontLoader';
@@ -33,7 +33,10 @@ export default function CanvasPreview({
   overlayCanvasRef,
   videoRef,
 }: CanvasPreviewProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  // Viewport & Stage DOM Refs
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+
   const internalVideoRef = useRef<HTMLVideoElement>(null);
   const activeVideoRef = videoRef || internalVideoRef;
 
@@ -74,37 +77,43 @@ export default function CanvasPreview({
     ? image.naturalHeight || 1000
     : 1000;
 
-  // Calculate base rendered dimensions fitting the container at 1x
-  const imgAspect = mediaWidth / mediaHeight;
-  const containerAspect =
-    containerSize.width > 0 && containerSize.height > 0
-      ? containerSize.width / containerSize.height
-      : 1;
+  // Calculate unscaled rendered stage size fitting the viewport container at 1x
+  const stageSize = useMemo(() => {
+    const vpW = containerSize.width || 300;
+    const vpH = containerSize.height || 300;
+    const mediaAspect = mediaWidth / mediaHeight;
+    const vpAspect = vpW / vpH;
 
-  let baseWidth = containerSize.width || 300;
-  let baseHeight = containerSize.height || 300;
+    let width = vpW;
+    let height = vpH;
 
-  if (containerSize.width > 0 && containerSize.height > 0) {
-    if (imgAspect > containerAspect) {
-      baseWidth = containerSize.width;
-      baseHeight = containerSize.width / imgAspect;
-    } else {
-      baseHeight = containerSize.height;
-      baseWidth = containerSize.height * imgAspect;
+    if (containerSize.width > 0 && containerSize.height > 0) {
+      if (mediaAspect > vpAspect) {
+        width = vpW;
+        height = vpW / mediaAspect;
+      } else {
+        height = vpH;
+        width = vpH * mediaAspect;
+      }
     }
-  }
 
-  // Calculate pan clamp bounds so user can inspect all 4 corners (stamps & logos)
+    return { width, height };
+  }, [mediaWidth, mediaHeight, containerSize]);
+
+  // Calculate pan clamp bounds so all 4 edges (especially bottom Timemark) are 100% reachable
   const getPanBounds = useCallback(
     (currentZoom: number) => {
-      const excessX = baseWidth * currentZoom - containerSize.width;
-      const excessY = baseHeight * currentZoom - containerSize.height;
-      // Allow reaching corners smoothly with a 20px / 24px comfort margin
-      const maxX = excessX > 0 ? excessX / 2 + 20 : 0;
-      const maxY = excessY > 0 ? excessY / 2 + 24 : 0;
-      return { maxX, maxY };
+      const stageWidth = stageRef.current?.offsetWidth || stageSize.width;
+      const stageHeight = stageRef.current?.offsetHeight || stageSize.height;
+      const viewportWidth = viewportRef.current?.clientWidth || containerSize.width;
+      const viewportHeight = viewportRef.current?.clientHeight || containerSize.height;
+
+      // Allow dragging all the way to borders + margin to clear floating toolbars completely
+      const maxPanX = Math.max(0, (stageWidth * currentZoom - viewportWidth) / 2 + 24);
+      const maxPanY = Math.max(0, (stageHeight * currentZoom - viewportHeight) / 2 + 56);
+      return { maxPanX, maxPanY };
     },
-    [baseWidth, baseHeight, containerSize]
+    [stageSize, containerSize]
   );
 
   const handleZoomChange = (newZoom: number) => {
@@ -113,10 +122,10 @@ export default function CanvasPreview({
     if (clamped <= 1.0) {
       setPan({ x: 0, y: 0 });
     } else {
-      const { maxX, maxY } = getPanBounds(clamped);
+      const { maxPanX, maxPanY } = getPanBounds(clamped);
       setPan((prev) => ({
-        x: Math.max(-maxX, Math.min(maxX, prev.x)),
-        y: Math.max(-maxY, Math.min(maxY, prev.y)),
+        x: Math.max(-maxPanX, Math.min(maxPanX, prev.x)),
+        y: Math.max(-maxPanY, Math.min(maxPanY, prev.y)),
       }));
     }
   };
@@ -140,13 +149,13 @@ export default function CanvasPreview({
     if (!isDragging || zoom <= 1.0) return;
     e.preventDefault();
 
-    const { maxX, maxY } = getPanBounds(zoom);
+    const { maxPanX, maxPanY } = getPanBounds(zoom);
     const proposedX = e.clientX - dragStartRef.current.x;
     const proposedY = e.clientY - dragStartRef.current.y;
 
     setPan({
-      x: Math.max(-maxX, Math.min(maxX, proposedX)),
-      y: Math.max(-maxY, Math.min(maxY, proposedY)),
+      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
+      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
     });
   };
 
@@ -168,13 +177,13 @@ export default function CanvasPreview({
     if (!isDragging || zoom <= 1.0 || e.touches.length !== 1) return;
     if (e.cancelable) e.preventDefault();
 
-    const { maxX, maxY } = getPanBounds(zoom);
+    const { maxPanX, maxPanY } = getPanBounds(zoom);
     const proposedX = e.touches[0].clientX - dragStartRef.current.x;
     const proposedY = e.touches[0].clientY - dragStartRef.current.y;
 
     setPan({
-      x: Math.max(-maxX, Math.min(maxX, proposedX)),
-      y: Math.max(-maxY, Math.min(maxY, proposedY)),
+      x: Math.max(-maxPanX, Math.min(maxPanX, proposedX)),
+      y: Math.max(-maxPanY, Math.min(maxPanY, proposedY)),
     });
   };
 
@@ -203,7 +212,7 @@ export default function CanvasPreview({
 
   // Observe container size
   useEffect(() => {
-    const container = containerRef.current;
+    const container = viewportRef.current;
     if (!container) return;
 
     const observer = new ResizeObserver((entries) => {
@@ -231,14 +240,14 @@ export default function CanvasPreview({
       if (renderId !== renderRef.current) return;
 
       try {
-        await renderWatermarkToCanvas(canvas, image, settings, baseWidth, baseHeight);
+        await renderWatermarkToCanvas(canvas, image, settings, stageSize.width, stageSize.height);
       } catch (err) {
         console.error('Image render failed:', err);
       }
     }, 16);
 
     return () => clearTimeout(timeout);
-  }, [image, settings, containerSize, canvasRef, baseWidth, baseHeight]);
+  }, [image, settings, containerSize, canvasRef, stageSize]);
 
   // -------------------------------------------------------------
   // 2. VIDEO: Real-time ticking watermark overlay renderer
@@ -344,7 +353,7 @@ export default function CanvasPreview({
 
   return (
     <div
-      ref={containerRef}
+      ref={viewportRef}
       className="relative w-full h-full min-h-[260px] flex items-center justify-center overflow-hidden select-none"
       style={{
         display: 'flex',
@@ -406,15 +415,16 @@ export default function CanvasPreview({
         </div>
       )}
 
-      {/* ---------------- Scaled & Panned Media Viewport ---------------- */}
+      {/* ---------------- Single Unified Inner Stage (Media + Timemark Canvas) ---------------- */}
       <div
+        ref={stageRef}
         style={{
-          width: `${Math.round(baseWidth)}px`,
-          height: `${Math.round(baseHeight)}px`,
-          maxWidth: '100%',
-          maxHeight: '100%',
           position: 'relative',
-          transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+          display: 'inline-block',
+          lineHeight: 0,
+          width: `${Math.round(stageSize.width)}px`,
+          height: `${Math.round(stageSize.height)}px`,
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           transformOrigin: 'center center',
           willChange: 'transform',
           transition: isDragging ? 'none' : 'transform 0.12s cubic-bezier(0, 0, 0.2, 1)',
@@ -427,7 +437,13 @@ export default function CanvasPreview({
             <video
               ref={activeVideoRef}
               src={videoSrc || video.src}
-              className="w-full h-full object-contain pointer-events-none rounded-sm"
+              style={{
+                width: '100%',
+                height: '100%',
+                display: 'block',
+                pointerEvents: 'none',
+              }}
+              className="rounded-sm"
               playsInline
               loop
               muted={isMuted}
@@ -437,7 +453,13 @@ export default function CanvasPreview({
             {/* Live transparent overlay canvas for real-time ticking watermark */}
             <canvas
               ref={activeOverlayRef}
-              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+              style={{
+                position: 'absolute',
+                inset: 0,
+                width: '100%',
+                height: '100%',
+                pointerEvents: 'none',
+              }}
             />
           </>
         )}
@@ -446,7 +468,13 @@ export default function CanvasPreview({
         {image && (
           <canvas
             ref={canvasRef as React.LegacyRef<HTMLCanvasElement>}
-            className="w-full h-full object-contain pointer-events-none rounded-sm"
+            style={{
+              width: '100%',
+              height: '100%',
+              display: 'block',
+              pointerEvents: 'none',
+            }}
+            className="rounded-sm"
           />
         )}
       </div>
